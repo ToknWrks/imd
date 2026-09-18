@@ -251,9 +251,11 @@ export function usdToEth(usd, ethUsd) {
  * Live position for one token: balance + USD value + ETH/USD, shared by the
  * /api/sniper/position endpoint and the P/L card so both always agree.
  */
-export async function getSniperPosition(chainKey, tokenAddress) {
-  const signer = await resolveSigner(chainKey);
-  const bal = await getTokenBalance(chainKey, tokenAddress, signer.address);
+export async function getSniperPosition(chainKey, tokenAddress, { walletOverride = null } = {}) {
+  // walletOverride (2026-09-18): per-user read wallet — hosted users' tokens
+  // live in THEIR wallets, not the global env signer's.
+  const address = walletOverride || (await resolveSigner(chainKey)).address;
+  const bal = await getTokenBalance(chainKey, tokenAddress, address);
   const ethUsd = await getEthUsd(chainKey);
   let valueUsd = 0;
   if (bal.formatted > 0) {

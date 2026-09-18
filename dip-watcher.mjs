@@ -737,8 +737,12 @@ async function refreshPositions() {
   for (const w of getActiveDipWatchers()) {
     const chainKey = w.chain || "ethereum";
     try {
-      const signer = await userSigner(w, chainKey);
-      const pos = await computeWalletPosition({ contractAddress: w.contract_address, decimals: w.decimals ?? 18, walletAddress: signer.address, chainKey });
+      // Balance READS use the user's read wallet (their SCW / connected
+      // wallet) — NOT the trade signer. A copilot user has no server signer
+      // at all, yet still owns tokens whose balances must show. (2026-09-18)
+      const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
+      const readWallet = await resolveUserReadWallet(w.user_id, chainKey);
+      const pos = await computeWalletPosition({ contractAddress: w.contract_address, decimals: w.decimals ?? 18, walletAddress: readWallet, chainKey });
       updateWalletPosition(w.id, {
         balance: pos.balance, balanceUsd: pos.balanceUsd, priceUsd: pos.priceUsd,
         costBasisUsd: pos.costBasisUsd, unrealizedPlUsd: pos.unrealizedPlUsd, unrealizedPlPct: pos.unrealizedPlPct,

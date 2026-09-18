@@ -47,12 +47,23 @@ function wrapSignerGas(signer, maxGasGwei) {
   };
 }
 
-export async function handleSniperRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain }) {
+export async function handleSniperRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain, sessionAddress = null }) {
+  // Per-user read wallet (2026-09-18): balances belong to the session user —
+  // their registry SCW / users-table key / connected wallet, never the global
+  // env signer (which on hosted shows 0 for everyone).
+  let readWallet = null;
+  try {
+    const uid = sessionAddress?.(null);
+    if (uid) {
+      const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
+      readWallet = await resolveUserReadWallet(uid, "ethereum");
+    }
+  } catch { /* fall through to per-route resolution */ }
   if (url === "/sniper" && method === "GET") {
     let ctx = { chain: "ethereum", ethUsd: 0, ethBalance: 0, usdcBalance: 0, ethUsdValue: 0 };
     try {
-      let owner = null;
-      try { owner = (await resolveSigner("ethereum")).address; } catch {}
+      let owner = readWallet;
+      if (!owner) { try { owner = (await resolveSigner("ethereum")).address; } catch {} }
       ctx = { chain: "ethereum", ...(await getQuoteContext("ethereum", owner)) };
     } catch {}
     // The bot's current target: active token auto-resumes on page load.
@@ -77,8 +88,8 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const body = JSON.parse(await readBody());
       const chainKey = body.chain || "ethereum";
       if (!SNIPER_CHAINS.includes(chainKey)) { json({ ok: false, error: "unsupported chain" }); return true; }
-      let owner = null;
-      try { owner = (await resolveSigner(chainKey)).address; } catch {}
+      let owner = readWallet;
+      if (!owner) { try { owner = (await resolveSigner(chainKey)).address; } catch {} }
       json({ ok: true, ...(await getQuoteContext(chainKey, owner)) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
@@ -288,7 +299,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
     try {
       const { chain, token } = JSON.parse(await readBody());
       const chainKey = chain || "ethereum";
-      json({ ok: true, ...(await getSniperPosition(chainKey, token)) });
+      json({ ok: true, ...(await getSniperPosition(chainKey, token, { walletOverride: readWallet })) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
   }
@@ -301,7 +312,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      const pos = await getSniperPosition(chainKey, token);
+      const pos = await getSniperPosition(chainKey, token, { walletOverride: readWallet });
       if (pos.ok === false) { json({ ok: false, error: pos.error }); return true; }
 
       // Ledger stats via the ONE canonical chronological avg-cost function
@@ -474,8 +485,10 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      const signer = await resolveSigner(chainKey);
-      const r = await syncExternalTrades({ chainKey, tokenAddress: token, wallet: signer.address });
+      // Sync reads the USER's wallet (2026-09-18) — the session user's SCW /
+      // connected wallet, not the global env signer.
+      const wallet = readWallet || (await resolveSigner(chainKey)).address;
+      const r = await syncExternalTrades({ chainKey, tokenAddress: token, wallet });
       json({ ok: true, ...r });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }

@@ -226,11 +226,14 @@ async function isSignerConfigured() {
 /** Compute and persist a token's wallet-position snapshot (balance, USD value, cost basis). */
 async function computeAndStorePosition(watcher) {
   try {
-    if (!(await isSignerConfigured())) { updateWalletPosition(watcher.id, { error: "no wallet configured" }); return; }
+    // Read wallet per USER (registry SCW → connected wallet → signer), not
+    // the global trade signer — copilot users hold tokens in wallets the
+    // global signer knows nothing about (2026-09-18 balance fix).
+    const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
+    const readWallet = await resolveUserReadWallet(watcher.user_id, watcher.chain || "ethereum");
     const chainKey = watcher.chain || "ethereum";
-    const signer = await resolveSigner(chainKey);
     const pos = await computeWalletPosition({
-      contractAddress: watcher.contract_address, decimals: watcher.decimals ?? 18, walletAddress: signer.address, chainKey,
+      contractAddress: watcher.contract_address, decimals: watcher.decimals ?? 18, walletAddress: readWallet, chainKey,
       poolOverride: watcher.pool_address,
     });
     updateWalletPosition(watcher.id, {
@@ -1764,7 +1767,7 @@ const server = createServer(async (req, res) => {
       items = alphaVisible(items.filter((t) => Number(t.volume24h || 0) * (imdUsd || 0) >= minVol));
       return json({ ok: true, src, minVol, count: items.length, updatedAt: data?.updatedAt ?? null, status: data?.status ?? null, error: error ?? null, rows: alphaRowsHtml(items) });
     }
-    if (await handleSniperRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain })) return;
+    if (await handleSniperRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain, sessionAddress })) return;
     // Alpha token modal: full holder distribution for a curve coin. Read-only
     // (one indexer fetch, 5-min server cache) — no funds move, no approval needed.
     if (url === "/api/alpha/holders" && method === "GET") {

@@ -123,6 +123,55 @@ function decryptSessionKey(stored) {
   return decryptSecret(stored); // null on wrong key / corruption
 }
 
+/**
+ * Resolve the wallet whose BALANCES a given user sees everywhere (tokens
+ * watcher position, sniper context/position/P/L, wallet-sync). Priority:
+ *   1. The user's per-connected-wallet session-key SCW from the registry
+ *      (their trading wallet — 0x566d-style users hold funds in the browser
+ *      wallet that owns it, and the SCW is what the slideout shows).
+ *   2. The users-table session key (legacy autonomy users).
+ *   3. The global env signer (system/legacy).
+ * 2026-09-18: the old code called the GLOBAL resolveSigner() here, so every
+ * user's token page showed the balance of the legacy env AA key's wallet
+ * (0xF4a6… — always 0) instead of their own. Balances are a READ — they
+ * belong to the user, not to whatever signer env happens to be active.
+ * Trades still sign through resolveSignerUser (co-pilot/autonomy unchanged).
+ */
+export async function resolveUserReadWallet(userId, chainKey = "ethereum") {
+  // 1. Registry SCW for this user (the per-connected-wallet trading wallet).
+  if (userId && /^0x[0-9a-fA-F]{40}$/.test(userId)) {
+    try {
+      const rec = getWalletRecord(userId);
+      if (rec?.sessionKeyEnc) {
+        const sk = decryptSessionKey(rec.sessionKeyEnc);
+        if (sk) {
+          const client = await getSmartAccountClient(chainKey, { sessionKey: sk });
+          return getAddress(client.account.address);
+        }
+      }
+    } catch { /* fall through */ }
+    // 2. Legacy users-table key (autonomy users who generated in Settings).
+    try {
+      const { getUserSecret } = await import("./users.mjs");
+      const sk = getUserSecret(userId, "session");
+      if (sk) {
+        const client = await getSmartAccountClient(chainKey, { sessionKey: sk });
+        return getAddress(client.account.address);
+      }
+    } catch { /* fall through */ }
+  }
+  // 3. The connected browser wallet address itself (copilot read-context —
+  //    tokens bought from the browser wallet show up here).
+  try {
+    const { getConnectedWallet } = await import("./wallet-connect-store.mjs");
+    const cw = getConnectedWallet();
+    if (cw) return cw;
+  } catch { /* fall through */ }
+  // 4. Global signer fallback (local dev / legacy).
+  const { resolveSigner } = await import("./signer.mjs");
+  return (await resolveSigner(chainKey)).address;
+}
+
 function dollarSymbol(chainKey) {
   const dep = getChain(chainKey);
   return dep.dollarDecimals === 6 ? "USDC" : "USD";
