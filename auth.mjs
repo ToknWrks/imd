@@ -169,6 +169,11 @@ export async function verifyLogin({ address, signature, nonce }, req) {
   if (!/^0x[0-9a-f]{40}$/.test(addr)) return { ok: false, error: "invalid address" };
   const nonceRec = consumeNonce(String(nonce));
   if (!nonceRec) return { ok: false, error: "nonce expired or already used — reconnect and try again" };
+  // Multi-user registration gate (Phase 2): REGISTRATION env controls who may
+  // create an account. "open" (default) = any valid wallet registers itself;
+  // "closed" = only wallets already in the users table may sign in.
+  // ALLOWED_WALLET, when set, acts as an allowlist that overrides registration
+  // mode (legacy single-user pin — still honored if present).
   const allowed = allowedWallet();
   if (allowed && addr !== allowed) {
     return { ok: false, error: `wallet ${addr.slice(0, 6)}…${addr.slice(-4)} is not the authorized wallet for this dashboard` };
@@ -180,9 +185,23 @@ export async function verifyLogin({ address, signature, nonce }, req) {
   } catch (e) {
     return fail("signature verification failed — login rejected");
   }
+  // Registration: auto-create the user row on first sign-in (open mode), or
+  // require an existing row (closed mode). Disabled accounts are locked out.
+  const { registerUser, isUserDisabled } = await import("./users.mjs");
+  const user = registrationMode() === "closed" ? (await import("./users.mjs")).getUser(addr) : registerUser(addr);
+  if (!user) {
+    return { ok: false, error: `wallet ${addr.slice(0, 6)}…${addr.slice(-4)} has no account — registration is closed. Ask an admin to add you.` };
+  }
+  if (isUserDisabled(addr)) {
+    return { ok: false, error: "this account has been disabled by an admin" };
+  }
   _verifyAttempts.delete(ipOf(req));
-  console.log(`[auth] ✅ wallet ${addr.slice(0, 6)}…${addr.slice(-4)} signed in`);
+  console.log(`[auth] ✅ wallet ${addr.slice(0, 6)}…${addr.slice(-4)} signed in${user.is_admin ? " (admin)" : ""}`);
   return { ok: true, address: addr };
+}
+
+function registrationMode() {
+  return (process.env.REGISTRATION || envValue("REGISTRATION") || "open").toLowerCase() === "closed" ? "closed" : "open";
 }
 
 // ── Login page (served to unauthenticated browser requests) ──────────────────
