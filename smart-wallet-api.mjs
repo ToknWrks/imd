@@ -45,13 +45,38 @@ export async function ensureWalletSession(connectedAddress, chainKey = "ethereum
   const rec = getWalletRecord(connectedAddress);
 
   // Known wallet → reuse its stored key (this is why switching back restores
-  // that wallet's smart wallet).
+  // that wallet's smart wallet). Key is encrypted at rest (MASTER_KEY);
+  // legacy plaintext rows are transparently upgraded.
   if (rec?.sessionKeyEnc) {
-    const sk = rec.sessionKeyEnc; // Phase 1: stored as-is; encrypt-at-rest later
+    let sk = decryptSessionKey(rec.sessionKeyEnc);
+    if (!sk) {
+      // The stored key can't be decrypted (missing MASTER_KEY or corrupted
+      // row). NEVER silently mint a new wallet here — that orphans funds and
+      // scrambles the address on every restart (2026-09-18 lesson).
+      console.error(`[wallet-session] ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}: stored session key UNREADABLE (MASTER_KEY set? registry corrupted?) — refusing to generate a new wallet. Fix MASTER_KEY or the registry, then retry.`);
+      throw new Error("Stored session key unreadable — refusing to mint a new wallet (funds-safety guard). Check MASTER_KEY / data/connected-wallets.json.");
+    }
+    // Legacy plaintext row (pre-encrypt-at-rest): upgrade it in place now that
+    // we've successfully read it.
+    if (/^0x[0-9a-fA-F]{64}$/.test(rec.sessionKeyEnc)) {
+      setWalletRecord(connectedAddress, {
+        scwAddress: rec.scwAddress,
+        sessionKeyAddress: rec.sessionKeyAddress,
+        sessionKeyEnc: encryptSessionKey(sk),
+      });
+      console.log(`[wallet-session] ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}: legacy plaintext session key upgraded to encrypted-at-rest`);
+    }
     process.env.AA_SESSION_KEY = sk;
     invalidateSmartAccountClient(chainKey);
     const client = await getSmartAccountClient(chainKey);
     return { ok: true, created: false, scwAddress: getAddress(client.account.address), sessionKeyAddress: rec.sessionKeyAddress };
+  }
+
+  // A record exists but WITHOUT a key (key was lost / file truncated): same
+  // guard — the SCW address is known and may hold funds, so do not re-derive.
+  if (rec && !rec.sessionKeyEnc) {
+    console.error(`[wallet-session] ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}: registry record for SCW ${rec.scwAddress} has NO session key — refusing to generate a new wallet.`);
+    throw new Error(`Smart wallet ${rec.scwAddress} is registered but its session key is missing — refusing to mint a new wallet (funds-safety guard).`);
   }
 
   // New wallet → generate a fresh session key, derive its SCW, record it.
@@ -67,7 +92,7 @@ export async function ensureWalletSession(connectedAddress, chainKey = "ethereum
     setWalletRecord(connectedAddress, {
       scwAddress,
       sessionKeyAddress,
-      sessionKeyEnc: sessionKey, // same protection level as .env; TODO encrypt-at-rest
+      sessionKeyEnc: encryptSessionKey(sessionKey), // encrypted at rest (MASTER_KEY)
     });
     return { ok: true, created: true, scwAddress, sessionKeyAddress };
   } catch (e) {
@@ -76,6 +101,26 @@ export async function ensureWalletSession(connectedAddress, chainKey = "ethereum
     invalidateSmartAccountClient(chainKey);
     throw e;
   }
+}
+
+// ── session-key encryption at rest (AES-256-GCM via users.mjs MASTER_KEY) ───
+import { encryptSecret, decryptSecret } from "./users.mjs";
+
+/** Encrypt a session key for the registry. Throws if MASTER_KEY is not set —
+ *  silently storing plaintext was the 2026-09-18 bug. */
+function encryptSessionKey(plain) {
+  if (!process.env.MASTER_KEY?.trim()) {
+    throw new Error("MASTER_KEY not set — refusing to store a session key unencrypted. Set MASTER_KEY in .env and restart.");
+  }
+  return encryptSecret(plain);
+}
+
+/** Decrypt a registry session key; transparently upgrades legacy plaintext
+ *  (0x-prefixed raw keys written before encrypt-at-rest existed). */
+function decryptSessionKey(stored) {
+  if (!stored) return null;
+  if (/^0x[0-9a-fA-F]{64}$/.test(stored)) return stored; // legacy plaintext
+  return decryptSecret(stored); // null on wrong key / corruption
 }
 
 function dollarSymbol(chainKey) {

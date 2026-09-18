@@ -58,16 +58,14 @@ ensureColumn("users", "disabled", "INTEGER NOT NULL DEFAULT 0");
 function masterKey() {
   const explicit = process.env.MASTER_KEY?.trim();
   if (!explicit) {
-    if (!_warned) {
-      console.warn("[users] MASTER_KEY not set — per-user secrets are held with a RANDOM per-process key and WILL NOT SURVIVE A RESTART. Set MASTER_KEY in .env to persist them.");
-      _warned = true;
-    }
-    return _ephemeralKey;
+    // HARD FAIL (2026-09-18 lesson): the old fallback encrypted secrets with a
+    // random per-process key — every restart silently destroyed every stored
+    // secret (session keys, Alchemy keys), which downstream turned into
+    // phantom smart wallets. Refusing to encrypt is the safe failure.
+    throw new Error("MASTER_KEY not set — refusing to encrypt user secrets with a per-process random key (they would not survive a restart). Set MASTER_KEY in .env and restart.");
   }
   return createHash("sha256").update(explicit).digest();
 }
-let _warned = false;
-const _ephemeralKey = randomBytes(32);
 
 export function encryptSecret(plain) {
   if (!plain) return null;
