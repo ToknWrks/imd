@@ -62,6 +62,7 @@ import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wa
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
 import { COPILOT_BADGE, COPILOT_JS } from "./copilot-ui.js";
 import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
+import { handleAuth } from "./auth.mjs";
 import { walletApiHandler } from "./wallet-api.mjs";
 import { activateSmartWallet, moveFunds } from "./smart-wallet-api.mjs";
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
@@ -1732,6 +1733,12 @@ const server = createServer(async (req, res) => {
   const readBody = () => new Promise((r) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => r(b)); });
 
   try {
+    // ── Wallet-signature auth gate ──────────────────────────────────────
+    // SIWE-style: connect + sign a one-time nonce; HMAC cookie session.
+    // Handles /api/auth/* itself; serves the login page or 401s APIs when
+    // unauthenticated. Returns false to proceed with normal routing.
+    if (handleAuth(req, res, { url, method, readBody, json, send })) return;
+
     if (url === "/" || url === "") return redirect("/overview");
     if (url === "/overview" && method === "GET") return send(await overviewPage());
     if (url === "/tokens" && method === "GET") return send(await watchersPage(undefined, requestUrl.searchParams.get("plan")));
