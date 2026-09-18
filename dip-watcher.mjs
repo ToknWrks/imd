@@ -44,6 +44,7 @@ const { findBestPool, getEthUsdPrice, buyToken, findBestV4Pool, findBestAerodrom
 const { computeWalletPosition } = await import("./wallet-position.mjs");
 const { resolveSigner } = await import("./signer.mjs");
 const { getWsClient, getChain } = await import("./chains.mjs");
+const { startWatchdog, stopWatchdog, noteWsActivity } = await import("./ws-watchdog.mjs");
 
 const SWAP_EVENT_ABI = parseAbi([
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
@@ -107,6 +108,7 @@ async function subscribe(watcher) {
       abi: SWAP_EVENT_ABI,
       eventName: "Swap",
       onLogs: (logs) => {
+        noteWsActivity(chainKey);
         for (const log of logs) {
           handleV3DollarSwap(watcher, best, log).catch((e) =>
             console.error(`[dip-watcher] ${label(watcher)}: error handling V3 dollar-pool swap — ${e.message}`)
@@ -115,7 +117,7 @@ async function subscribe(watcher) {
       },
       onError: (e) => console.error(`[dip-watcher] ${label(watcher)}: V3 dollar-pool subscription error — ${e.message}`),
     });
-    active.set(watcher.id, { unwatch, poolAddress: best.address });
+    active.set(watcher.id, { unwatch, poolAddress: best.address, chainKey });
     console.log(`[dip-watcher] Watching ${label(watcher)} on ${dep.name} — V3 dollar pool ${best.address} (fee ${best.fee}, liq $${Math.round(best.liquidityUsd).toLocaleString()}) — threshold $${watcher.threshold_usd}, buy $${watcher.buy_amount_usd}`);
     return;
   }
@@ -128,6 +130,7 @@ async function subscribe(watcher) {
       abi: isCl ? AERO_CL_SWAP_ABI : AERO_V2_SWAP_ABI,
       eventName: "Swap",
       onLogs: (logs) => {
+        noteWsActivity(chainKey);
         for (const log of logs) {
           handleAeroSwap(watcher, best, log).catch((e) =>
             console.error(`[dip-watcher] ${label(watcher)}: error handling Aerodrome swap — ${e.message}`)
@@ -136,7 +139,7 @@ async function subscribe(watcher) {
       },
       onError: (e) => console.error(`[dip-watcher] ${label(watcher)}: Aerodrome subscription error — ${e.message}`),
     });
-    active.set(watcher.id, { unwatch, poolAddress: best.address });
+    active.set(watcher.id, { unwatch, poolAddress: best.address, chainKey });
     const liqTxt = Math.round(best.liquidityUsd ?? 0).toLocaleString();
     console.log(`[dip-watcher] Watching ${label(watcher)} on ${dep.name} — Aerodrome ${isCl ? "Slipstream" : "V2"} ${best.quote === "usdc" ? "USDC" : "WETH"} pool ${best.address} (${isCl ? `fee ${best.fee}, ts ${best.tickSpacing}` : best.stable ? "stable" : "volatile"}, liq $${liqTxt}) — threshold $${watcher.threshold_usd}, buy $${watcher.buy_amount_usd}`);
     return;
@@ -152,6 +155,7 @@ async function subscribe(watcher) {
       eventName: "Swap",
       args: { id: v4Pool.poolId },
       onLogs: (logs) => {
+        noteWsActivity(chainKey);
         for (const log of logs) {
           handleV4Swap(watcher, v4Pool, log).catch((e) =>
             console.error(`[dip-watcher] ${label(watcher)}: error handling V4 swap — ${e.message}`)
@@ -160,7 +164,7 @@ async function subscribe(watcher) {
       },
       onError: (e) => console.error(`[dip-watcher] ${label(watcher)}: V4 subscription error — ${e.message}`),
     });
-    active.set(watcher.id, { unwatch, poolAddress: v4Pool.poolId });
+    active.set(watcher.id, { unwatch, poolAddress: v4Pool.poolId, chainKey });
     console.log(`[dip-watcher] Watching ${label(watcher)} on ${dep.name} — V4 pool ${v4Pool.poolId} (fee ${v4Pool.fee}, tickSpacing ${v4Pool.tickSpacing}, liq $${Math.round(v4Pool.liquidityUsd).toLocaleString()}) — threshold $${watcher.threshold_usd}, buy $${watcher.buy_amount_usd}`);
     return;
   }
@@ -174,6 +178,7 @@ async function subscribe(watcher) {
     abi: SWAP_EVENT_ABI,
     eventName: "Swap",
     onLogs: (logs) => {
+      noteWsActivity(chainKey);
       for (const log of logs) {
         handleSwap(watcher, wethIsToken0, log).catch((e) =>
           console.error(`[dip-watcher] ${label(watcher)}: error handling swap — ${e.message}`)
@@ -183,7 +188,7 @@ async function subscribe(watcher) {
     onError: (e) => console.error(`[dip-watcher] ${label(watcher)}: subscription error — ${e.message}`),
   });
 
-  active.set(watcher.id, { unwatch, poolAddress: pool.address });
+  active.set(watcher.id, { unwatch, poolAddress: pool.address, chainKey });
   console.log(`[dip-watcher] Watching ${label(watcher)} on ${dep.name} — pool ${pool.address} (fee ${pool.fee}) — threshold $${watcher.threshold_usd}, buy $${watcher.buy_amount_usd}`);
 }
 
@@ -641,7 +646,49 @@ async function reconcile() {
       catch (e) { console.error(`[dip-watcher] Failed to subscribe ${label(w)}: ${e.message}`); }
     }
   }
+
+  syncWatchdogs(watchers);
 }
+
+/**
+ * One watchdog per chain with active watchers. The watchdog's rebuild closure
+ * drops every active subscription for that chain and re-subscribes from
+ * scratch (the same code path as a fresh reconcile for those watchers).
+ */
+function syncWatchdogs(watchers) {
+  const chains = new Set(watchers.map((w) => w.chain || "ethereum"));
+  for (const chainKey of chains) {
+    if (!_watchdogsArmed.has(chainKey)) {
+      _watchdogsArmed.add(chainKey);
+      startWatchdog(chainKey, async () => {
+        // Drop every subscription for this chain, then re-run the normal
+        // subscribe flow for its watchers (subscribe() repopulates `active`).
+        // WS-only — no signer invalidation needed.
+        const chainWatchers = getActiveDipWatchers().filter((w) => (w.chain || "ethereum") === chainKey);
+        for (const [id, entry] of active) {
+          if ((entry.chainKey ?? "ethereum") === chainKey) {
+            try { entry.unwatch(); } catch {}
+            active.delete(id);
+          }
+        }
+        for (const w of chainWatchers) {
+          try { await subscribe(w); }
+          catch (e) { console.error(`[ws-watchdog] rebuild: failed to resubscribe ${label(w)} — ${e.message}`); }
+        }
+      });
+      console.log(`[dip-watcher] ws-watchdog armed for ${chainKey}`);
+    }
+  }
+  for (const chainKey of [..._watchdogsArmed]) {
+    if (!chains.has(chainKey)) {
+      _watchdogsArmed.delete(chainKey);
+      stopWatchdog(chainKey);
+      console.log(`[dip-watcher] ws-watchdog disarmed for ${chainKey} (no active watchers)`);
+    }
+  }
+}
+
+const _watchdogsArmed = new Set();
 
 /** Rescan the wallet's balance/USD value/cost basis for every active token. */
 async function refreshPositions() {
