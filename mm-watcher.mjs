@@ -23,6 +23,7 @@ import { normalizeMmConfig, decideTrade, summarizeExternalFlow } from "./mm-engi
 import { resolveMmVenue, getMmSnapshot, quoteImpactPct, executeMmBuy, executeMmSell, getQuoteTokenDecimals } from "./mm-swap.mjs";
 import { getErc20Balance } from "./dip-swap.mjs";
 import { getChain, httpClient, getAnalysisClient, getLogsClient } from "./chains.mjs";
+import { alert } from "./notify.mjs";
 
 // ── Load .env (same pattern as dip-watcher.mjs — no dotenv dependency) ───────
 
@@ -267,6 +268,9 @@ async function executeLeg({ s, chainKey, venue, cls, meta, trade, snap, signer, 
       strategy_id: s.id, side: trade.side, dry_run: dryRun ? 1 : 0,
       reason: trade.reason, status: "error", error: msg,
     });
+    if (!dryRun) {
+      await alert(`mm-fail-${s.id}`, `🚨 MM LEG FAILED — ${s.symbol ?? s.token_address} ${trade.side}: ${msg}`);
+    }
     throw e;
   }
 }

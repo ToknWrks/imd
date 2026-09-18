@@ -45,6 +45,14 @@ const { computeWalletPosition } = await import("./wallet-position.mjs");
 const { resolveSigner } = await import("./signer.mjs");
 const { getWsClient, getChain } = await import("./chains.mjs");
 const { startWatchdog, stopWatchdog, noteWsActivity } = await import("./ws-watchdog.mjs");
+const { alert } = await import("./notify.mjs");
+
+// Trade-failure alerting: dedupe key includes the watcher so repeated failures
+// on different tokens all surface, but the same token's flapping doesn't spam.
+function alertTradeFailure(watcher, kind, message) {
+  const chainKey = watcher.chain || "ethereum";
+  alert(`trade-fail-${watcher.id}-${kind}`, `🚨 ${kind} FAILED — ${label(watcher)} on ${chainKey}: ${message}`, { force: /insufficient/i.test(message) });
+}
 
 const SWAP_EVENT_ABI = parseAbi([
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
@@ -291,6 +299,7 @@ async function handleV4Swap(watcher, pool, log) {
   } catch (e) {
     if (reservation) finalizeStrategyExecution({ executionId: reservation.executionId, error: e.message });
     console.error(`[dip-watcher] ❌ ${label(watcher)}: V4 buy failed — ${e.message}`);
+    alertTradeFailure(watcher, "V4 dip buy", e.message);
     insertDipTrade({
       watcher_id: watcher.id,
       sell_tx_hash: log.transactionHash,
@@ -373,6 +382,7 @@ async function handleV3DollarSwap(watcher, pool, log) {
   } catch (e) {
     if (reservation) finalizeStrategyExecution({ executionId: reservation.executionId, error: e.message });
     console.error(`[dip-watcher] ❌ ${label(watcher)}: buy failed — ${e.message}`);
+    alertTradeFailure(watcher, "dip buy", e.message);
     insertDipTrade({
       watcher_id: watcher.id,
       sell_tx_hash: log.transactionHash,
@@ -479,6 +489,7 @@ async function handleAeroSwap(watcher, pool, log) {
   } catch (e) {
     if (reservation) finalizeStrategyExecution({ executionId: reservation.executionId, error: e.message });
     console.error(`[dip-watcher] ❌ ${label(watcher)}: buy failed — ${e.message}`);
+    alertTradeFailure(watcher, "dip buy", e.message);
     insertDipTrade({
       watcher_id: watcher.id,
       sell_tx_hash: log.transactionHash,
@@ -558,6 +569,7 @@ async function handleSwap(watcher, wethIsToken0, log) {
   } catch (e) {
     if (reservation) finalizeStrategyExecution({ executionId: reservation.executionId, error: e.message });
     console.error(`[dip-watcher] ❌ ${label(watcher)}: buy failed — ${e.message}`);
+    alertTradeFailure(watcher, "dip buy", e.message);
     insertDipTrade({
       watcher_id: watcher.id,
       sell_tx_hash: log.transactionHash,
@@ -602,6 +614,7 @@ async function runScheduledBuys() {
     } catch (e) {
       if (reservation) finalizeStrategyExecution({ executionId: reservation.executionId, error: e.message });
       console.error(`[dip-watcher] ❌ ${label(strategy)}: scheduled Zooch buy failed — ${e.message}`);
+      alertTradeFailure(strategy, "scheduled buy", e.message);
       // A fully-committed budget never frees itself — without this guard the
       // scheduler retried every tick (30s) and logged an error row each time
       // (1,212 IF rows overnight, 2026-09-13). Deactivate once, loudly.
@@ -690,6 +703,30 @@ function syncWatchdogs(watchers) {
 
 const _watchdogsArmed = new Set();
 
+/**
+ * Low-gas check: once per position-refresh cycle, read the signer's ETH
+ * balance per chain and alert when it drops below LOW_GAS_ETH (default 0.005).
+ * Deduped by notify.mjs — it re-fires only after the dedupe window or when
+ * forced. A wallet that can't pay gas is a silent stop for every strategy.
+ */
+async function checkGasBalance() {
+  const threshold = Number(process.env.LOW_GAS_ETH ?? 0.005);
+  const chains = new Set(getActiveDipWatchers().map((w) => w.chain || "ethereum"));
+  for (const chainKey of chains) {
+    try {
+      const signer = await resolveSigner(chainKey);
+      const balanceEth = Number(await signer.getEthBalanceWei()) / 1e18;
+      if (balanceEth < threshold) {
+        await alert(`low-gas-${chainKey}-${signer.address}`,
+          `⛽ LOW GAS on ${chainKey}: ${signer.address.slice(0, 8)}…${signer.address.slice(-6)} holds ${balanceEth.toFixed(5)} ETH (below ${threshold}) — trades will fail until refilled`,
+          { force: true }); // forced: running-out-of-money is worth repeating
+      }
+    } catch (e) {
+      console.error(`[dip-watcher] gas check failed on ${chainKey}: ${e.message}`);
+    }
+  }
+}
+
 /** Rescan the wallet's balance/USD value/cost basis for every active token. */
 async function refreshPositions() {
   for (const w of getActiveDipWatchers()) {
@@ -722,3 +759,6 @@ setInterval(() => runScheduledBuys().catch((e) => console.error(`[dip-watcher] s
 
 refreshPositions().catch((e) => console.error(`[dip-watcher] initial position refresh failed: ${e.message}`));
 setInterval(() => refreshPositions().catch((e) => console.error(`[dip-watcher] position refresh failed: ${e.message}`)), POSITION_REFRESH_MS);
+
+checkGasBalance().catch((e) => console.error(`[dip-watcher] initial gas check failed: ${e.message}`));
+setInterval(() => checkGasBalance().catch((e) => console.error(`[dip-watcher] gas check failed: ${e.message}`)), POSITION_REFRESH_MS);
