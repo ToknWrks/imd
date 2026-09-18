@@ -980,7 +980,7 @@ async function tokenDetailPage(watcherId, userId = null) {
   `, "tokens");
 }
 
-async function settingsPage(vaultMsg = "") {
+async function settingsPage(vaultMsg = "", userId = null) {
   const vaultActive = getEnvValue("VAULT_ACTIVE") === "true";
   const status = await vaultStatus(getEnvValue("VULTISIG_PASS")).catch((e) => ({ exists: false, error: e.message }));
   const pk = getEnvValue("AGENT_PRIVATE_KEY");
@@ -1003,6 +1003,14 @@ async function settingsPage(vaultMsg = "") {
   const smartActive = getEnvValue("SMART_ACCOUNT_ACTIVE") === "true";
   const copilotOn = isCopilotActive();
   const copilotConnected = getEnvValue("CONNECTED_WALLET");
+  // Per-user signer state (Phase 2): mode + key presence from the users table.
+  let userMode = "copilot";
+  let userHasSessionKey = false;
+  if (userId) {
+    const { getUser } = await import("./users.mjs");
+    const u = getUser(userId);
+    if (u) { userMode = u.signer_mode || "copilot"; userHasSessionKey = !!u.session_key_enc; }
+  }
   const aaSessionKey = getEnvValue("AA_SESSION_KEY");
   let smartAddress = "";
   let smartModeNote = "";
@@ -1043,12 +1051,7 @@ async function settingsPage(vaultMsg = "") {
           <code id="userGenKey" style="display:block;word-break:break-all;font-size:0.72rem;color:#e8eaed;user-select:all"></code>
           <p class="hint" style="margin:0.4rem 0 0">Your smart account: <code id="userGenAddr"></code> — fund it with your plan budget + gas. Same key = same address, always.</p>
         </div>
-        <div style="margin-top:0.8rem">
-          <label style="font-size:0.85rem"><input type="radio" name="userSignerMode" value="copilot" checked> Co-pilot — approve every trade in the browser</label><br>
-          <label style="font-size:0.85rem"><input type="radio" name="userSignerMode" value="autonomy"> Autonomy — server signs with my session key (requires a generated key above)</label>
-        </div>
-        <button onclick="saveUserSignerMode(this)" style="margin-top:0.5rem">Save signer mode</button>
-        <p class="hint" style="margin-top:0.5rem">Uses the platform ALCHEMY_API_KEY for the bundler/RPC. Your session key is stored AES-256-GCM encrypted; back it up when shown — it is a wallet seed.</p>
+        <p class="hint" style="margin-top:0.8rem">Uses the platform ALCHEMY_API_KEY for the bundler/RPC. Your session key is stored AES-256-GCM encrypted; back it up when shown — it is a wallet seed. Pick your trading mode in the <b>Trading mode</b> card below.</p>
       </div>
       <div id="legacyFields" style="${!smartActive ? "" : "display:none"}">
         <p class="hint" style="color:#e8b661">Legacy signing — kept for headless setups only. The header <b>Connect wallet</b> + smart-wallet flow replaces this for interactive use.</p>
@@ -1085,15 +1088,16 @@ async function settingsPage(vaultMsg = "") {
 
     <div class="card">
       <h2>Trading mode</h2>
-      <p class="hint"><b>Autonomy</b> — the configured signer (smart wallet / legacy) trades automatically. <b>Co-pilot</b> — every trade (dip, sniper, and MM) waits for your approval: the dashboard pops an approval modal, your connected browser wallet signs it, and anything you don't approve in time is <b>skipped and logged</b> — never traded without explicit approval.</p>
-      <div class="field"><label>Mode</label>
+      <p class="hint"><b>Autonomy</b> — your own smart wallet (session key) trades automatically. <b>Co-pilot</b> — every trade (dip, sniper, and MM) waits for your approval: the dashboard pops an approval modal, your connected browser wallet signs it, and anything you don't approve in time is <b>skipped and logged</b> — never traded without explicit approval.</p>
+      <div class="field"><label>Your mode</label>
         <select id="copilotMode">
-          <option value="off" ${!copilotOn ? "selected" : ""}>Autonomy — trade automatically (session key)</option>
-          <option value="on" ${copilotOn ? "selected" : ""}>Co-pilot — approve every trade in the browser</option>
+          <option value="off" ${userMode === "autonomy" ? "selected" : ""}>Autonomy — trade automatically (your session key)</option>
+          <option value="on" ${userMode === "copilot" ? "selected" : ""}>Co-pilot — approve every trade in the browser</option>
         </select>
       </div>
-      ${copilotOn && !copilotConnected ? `<p class="hint" style="color:#f87171">⚠ Co-pilot is ON but no wallet is connected — trades will fail until you click <b>Connect wallet</b> in the header.</p>` : ""}
-      ${copilotOn ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Timeout: <code>COPILOT_TIMEOUT_S</code> (default 90s).</p>` : ""}
+      ${userMode === "autonomy" && !userHasSessionKey ? `<p class="hint" style="color:#f87171">⚠ Autonomy selected but no session key stored — generate one in the Signer section above, then save again.</p>` : ""}
+      ${userMode === "autonomy" && userHasSessionKey ? `<p class="hint">✓ Autonomy active — trades sign with your session key.</p>` : ""}
+      ${userMode === "copilot" ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Timeout: <code>COPILOT_TIMEOUT_S</code> (default 90s).</p>` : ""}
       <button onclick="saveCopilotMode(this)">Save trading mode</button>
     </div>
 
@@ -1170,16 +1174,14 @@ async function settingsPage(vaultMsg = "") {
           if (!j.ok) { box.innerHTML = '<p class="hint" style="color:#f87171">' + (j.error || 'unavailable') + '</p>'; return; }
           if (!j.hasKey) {
             box.innerHTML = '<p class="hint">No session key yet — click <b>Generate a session key</b> below. Your key derives YOUR OWN smart account; fund that address with your plan budget + gas.</p>'
-              + '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b></p>';
-            document.querySelector('input[name="userSignerMode"][value="' + (j.signerMode === 'autonomy' ? 'autonomy' : 'copilot') + '"]').checked = true;
+              + '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b> — change it in the Trading mode card below.</p>';
             return;
           }
           box.innerHTML =
             '<p>✓ Your smart account — <code>' + j.address + '</code></p>' +
             '<p class="hint">Balance: ' + j.eth.toFixed(6) + ' ETH' + (j.usd != null ? ' · ' + j.usd.toFixed(2) + ' USD' : '') + ' · ' + (j.deployed ? 'deployed' : 'not yet deployed (first trade deploys it)') + '</p>' +
             '<p class="hint">Fund THIS address from the wallet slideout. Same key = same address, always.</p>' +
-            '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b></p>';
-          document.querySelector('input[name="userSignerMode"][value="' + (j.signerMode || 'copilot') + '"]').checked = true;
+            '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b> — change it in the Trading mode card below.</p>';
         } catch (e) {
           box.innerHTML = '<p class="hint" style="color:#f87171">' + (e.message || e) + '</p>';
         }
@@ -1219,16 +1221,6 @@ async function settingsPage(vaultMsg = "") {
         } catch (e) { alert('Generation failed: ' + (e.message || e)); }
         finally { btn.disabled = false; btn.textContent = 'Regenerate key'; }
       }
-      async function saveUserSignerMode(btn) {
-        const mode = document.querySelector('input[name="userSignerMode"]:checked').value;
-        btn.disabled = true;
-        try {
-          const r = await fetch('/api/user/signer-mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode }) });
-          const j = await r.json();
-          if (!j.ok) { alert(j.error); return; }
-          location.reload();
-        } catch (e) { alert(e.message || e); }
-        finally { btn.disabled = false; }
       }
       loadUserWallet();
       async function saveAaKey() {
@@ -1293,12 +1285,13 @@ async function settingsPage(vaultMsg = "") {
       }
       async function saveCopilotMode() {
         const sel = document.getElementById('copilotMode');
-        const active = sel.value === 'on';
-        if (active && !window.ethereum) { alert('Co-pilot needs a browser wallet (MetaMask/Rabby) installed before you can enable it.'); return; }
+        // Per-user mode: 'off' = autonomy, 'on' = co-pilot (legacy dropdown values kept for the UI)
+        const mode = sel.value === 'on' ? 'copilot' : 'autonomy';
+        if (mode === 'copilot' && !window.ethereum) { alert('Co-pilot needs a browser wallet (MetaMask/Rabby) installed before you can enable it.'); return; }
         const btns = document.querySelectorAll('#copilotMode ~ button, button[onclick^="saveCopilotMode"]');
         btns.forEach(function(b){ b.disabled = true; });
         try {
-          const r = await fetch('/api/copilot/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ active }) });
+          const r = await fetch('/api/user/signer-mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode }) });
           const j = await r.json();
           if (!j.ok) { alert(j.error); return; }
           location.reload();
@@ -1869,7 +1862,7 @@ const server = createServer(async (req, res) => {
     if (await handleMmRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain })) return;
     if (await handleVerifyRequest(url, method, { readBody, json, send, shell, esc })) return;
     if (url === "/trades" && method === "GET") return send(tradesPage(sessionAddress(req)));
-    if (url === "/settings" && method === "GET") return send(await settingsPage());
+    if (url === "/settings" && method === "GET") return send(await settingsPage("", sessionAddress(req)));
 
     // ── Per-user trading wallet (session key / SCW) ────────────────────────
     if (url === "/api/user/wallet" && method === "GET") {
