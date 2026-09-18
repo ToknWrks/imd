@@ -747,8 +747,12 @@ async function refreshPositions() {
 }
 
 console.log("[dip-watcher] Starting — polling for active watchers every 30s");
-if (!process.env.AGENT_PRIVATE_KEY && process.env.VAULT_ACTIVE !== "true") {
-  console.error("[dip-watcher] No signer configured. Set AGENT_PRIVATE_KEY or VAULT_ACTIVE=true in .env");
+// Signer gate: the smart account (AA session key) is a valid signer too. The
+// old check only knew about AGENT_PRIVATE_KEY / VAULT_ACTIVE and crash-looped
+// the VPS deployment (session-key-only .env). Any resolvable signer passes;
+// a broken AA config throws on first resolveSigner and pm2 restarts anyway.
+if (!process.env.AGENT_PRIVATE_KEY && process.env.VAULT_ACTIVE !== "true" && process.env.SMART_ACCOUNT_ACTIVE !== "true") {
+  console.error("[dip-watcher] No signer configured. Set SMART_ACCOUNT_ACTIVE=true (with AA_SESSION_KEY), AGENT_PRIVATE_KEY, or VAULT_ACTIVE=true in .env");
   process.exit(1);
 }
 
