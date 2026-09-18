@@ -207,11 +207,15 @@ function watcherOwnershipError(req, watcherId) {
 // ── Pages ─────────────────────────────────────────────────────────────────────
 
 async function isSignerConfigured() {
+  // Phase 2 hosted: a CONNECTED WALLET (address-only, header Connect button) is
+  // a fully valid read-context — the "no wallet configured" error should not
+  // appear on /tokens just because there's no legacy env signer.
+  if (getEnvValue("CONNECTED_WALLET")?.trim()) return true;
   if (getEnvValue("VAULT_ACTIVE") === "true") {
     const status = await vaultStatus(getEnvValue("VULTISIG_PASS")).catch(() => ({ exists: false }));
     return !!(status.exists && status.address && status.isDeviceShare !== false);
   }
-  return !!getEnvValue("AGENT_PRIVATE_KEY");
+  return !!getEnvValue("AGENT_PRIVATE_KEY") || getEnvValue("SMART_ACCOUNT_ACTIVE") === "true";
 }
 
 /** Compute and persist a token's wallet-position snapshot (balance, USD value, cost basis). */
@@ -1031,14 +1035,8 @@ async function settingsPage(vaultMsg = "", userId = null) {
 
     <div class="card">
       <h2>Signer</h2>
-      <p class="hint">The smart wallet (Alchemy Modular Account, ERC-4337) signs all trades. Your wallet connects from the header button and funds the smart wallet — its key never touches the server.</p>
-      <div class="field"><label>Mode</label>
-        <select id="signerMode" onchange="toggleSignerFields()">
-          <option value="smart" ${smartActive ? "selected" : ""}>Smart wallet (Alchemy AA) — recommended</option>
-          <option value="legacy" ${!smartActive ? "selected" : ""}>Legacy (VultiSig / raw key) — deprecated</option>
-        </select>
-      </div>
-      <div id="smartFields" style="${smartActive ? "" : "display:none"}">
+      <p class="hint"><b>Default:</b> the wallet connected in the header (${copilotConnected ? `<code>${copilotConnected.slice(0, 6)}…${copilotConnected.slice(-4)}</code>` : "none connected yet — click Connect wallet above"}). In <b>Co-pilot</b> mode it approves every trade. Optionally generate a <b>smart wallet</b> below for autonomous trading — its session key is stored encrypted on this server, and it signs trades without waiting for you.</p>
+      <div id="smartFields">
         <div id="userWalletBox">
           <p class="hint">Loading your trading wallet…</p>
         </div>
@@ -1052,37 +1050,6 @@ async function settingsPage(vaultMsg = "", userId = null) {
           <p class="hint" style="margin:0.4rem 0 0">Your smart account: <code id="userGenAddr"></code> — fund it with your plan budget + gas. Same key = same address, always.</p>
         </div>
         <p class="hint" style="margin-top:0.8rem">Uses the platform ALCHEMY_API_KEY for the bundler/RPC. Your session key is stored AES-256-GCM encrypted; back it up when shown — it is a wallet seed. Pick your trading mode in the <b>Trading mode</b> card below.</p>
-      </div>
-      <div id="legacyFields" style="${!smartActive ? "" : "display:none"}">
-        <p class="hint" style="color:#e8b661">Legacy signing — kept for headless setups only. The header <b>Connect wallet</b> + smart-wallet flow replaces this for interactive use.</p>
-        <div class="field"><label>Mode</label>
-          <select id="legacyMode" onchange="toggleLegacyMode()">
-            <option value="vault" ${vaultActive ? "selected" : ""}>VultiSig MPC vault</option>
-            <option value="key" ${!vaultActive ? "selected" : ""}>Raw private key</option>
-          </select>
-        </div>
-        <div id="keyFields" style="${vaultActive ? "display:none" : ""}">
-          <div class="field"><label>AGENT_PRIVATE_KEY (0x-prefixed)</label><input id="pk" type="password" placeholder="${pkMasked || "0x..."}"></div>
-          <button onclick="saveKey()">Save key</button>
-        </div>
-        <div id="vaultFields" style="${vaultActive ? "" : "display:none"}">
-        ${status.exists && status.address
-          ? `<p>✓ Vault loaded — <code>${status.address}</code>${status.isDeviceShare === false ? ' <span style="color:#f87171">(server share — will not sign!)</span>' : ""}</p>`
-          : `<p class="hint">No vault installed yet.</p>`}
-        <h2 style="margin-top:1.25rem">Create a new Fast Vault</h2>
-        <div class="row">
-          <div class="field"><label>Name</label><input id="vName" placeholder="accumulate"></div>
-          <div class="field"><label>Email</label><input id="vEmail" type="email"></div>
-        </div>
-        <div class="field"><label>Password</label><input id="vPassword" type="password"></div>
-        <button class="secondary" onclick="createVault()">Send verification email</button>
-        <div class="field" style="margin-top:0.75rem"><label>Verification code</label><input id="vCode" placeholder="123456"></div>
-        <button onclick="verifyVault()">Verify &amp; activate</button>
-        <h2 style="margin-top:1.25rem">Import an existing .vult backup</h2>
-        <div class="field"><label>Paste .vult file contents</label><input id="vFileContent" placeholder="paste vault backup text"></div>
-        <div class="field"><label>Password (if encrypted)</label><input id="vImportPassword" type="password"></div>
-        <button class="secondary" onclick="importVault()">Import &amp; activate</button>
-        </div>
       </div>
     </div>
 
@@ -1150,20 +1117,6 @@ async function settingsPage(vaultMsg = "", userId = null) {
         btn.textContent = original;
       }
 
-      function toggleSignerFields() {
-        const mode = document.getElementById('signerMode').value;
-        document.getElementById('smartFields').style.display = mode === 'smart' ? '' : 'none';
-        document.getElementById('legacyFields').style.display = mode === 'legacy' ? '' : 'none';
-        const env = mode === 'smart' ? { VAULT_ACTIVE: 'false', SMART_ACCOUNT_ACTIVE: 'true' }
-                  : { VAULT_ACTIVE: 'false', SMART_ACCOUNT_ACTIVE: 'false' };
-        fetch('/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(env) });
-      }
-      function toggleLegacyMode() {
-        const legacy = document.getElementById('legacyMode').value;
-        document.getElementById('keyFields').style.display = legacy === 'key' ? '' : 'none';
-        document.getElementById('vaultFields').style.display = legacy === 'vault' ? '' : 'none';
-        fetch('/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ VAULT_ACTIVE: legacy === 'vault' ? 'true' : 'false' }) });
-      }
       // ── Per-user trading wallet (session key + SCW) ──────────────────────
       async function loadUserWallet() {
         const box = document.getElementById('userWalletBox');
@@ -1221,47 +1174,7 @@ async function settingsPage(vaultMsg = "", userId = null) {
         } catch (e) { alert('Generation failed: ' + (e.message || e)); }
         finally { btn.disabled = false; btn.textContent = 'Regenerate key'; }
       }
-      }
       loadUserWallet();
-      async function saveAaKey() {
-        const v = document.getElementById('aaSessionKey').value.trim();
-        if (!v) return;
-        await fetch('/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ AA_SESSION_KEY: v, SMART_ACCOUNT_ACTIVE: 'true', VAULT_ACTIVE: 'false' }) });
-        location.reload();
-      }
-      async function generateAaKey(btn) {
-        const hasKey = document.getElementById('aaSessionKey').placeholder.includes('…');
-        if (!confirm('Generate a fresh burner session key? It is saved to .env on this machine and shown ONCE below — back it up immediately.' + (hasKey ? '\\n\\nNOTE: the old key remains a valid owner (MultiOwner account), but the app will track the NEW account. Move funds if you want everything in one place.' : ''))) return;
-        btn.disabled = true; btn.textContent = 'Generating…';
-        try {
-          const r = await fetch('/api/smart-wallet/generate', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ chain: 'ethereum' }) });
-          const j = await r.json();
-          if (!j.ok && j.blocked === 'funds-present') {
-            if (!confirm(j.message + '\\n\\nOverride and generate anyway? The funded account stays owned by the old key (recoverable with its backup), but this app will track the new empty account.')) { btn.disabled = false; btn.textContent = 'Regenerate key'; return; }
-            const r2 = await fetch('/api/smart-wallet/generate', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ chain: 'ethereum', force: true }) });
-            const j2 = await r2.json();
-            if (!j2.ok) throw new Error(j2.error || j2.message || 'generation failed');
-            document.getElementById('aaGenKey').textContent = j2.sessionKey;
-            document.getElementById('aaGenAddr').textContent = j2.address;
-            document.getElementById('aaGenResult').style.display = '';
-            return;
-          }
-          if (!j.ok) throw new Error(j.error || j.message || 'generation failed');
-          document.getElementById('aaGenKey').textContent = j.sessionKey;
-          document.getElementById('aaGenAddr').textContent = j.address;
-          document.getElementById('aaGenResult').style.display = '';
-        } catch (e) {
-          alert('Generation failed: ' + (e.message || e));
-        } finally {
-          btn.disabled = false;
-        }
-      }
-      async function saveKey() {
-        const pk = document.getElementById('pk').value.trim();
-        if (!pk) return;
-        await fetch('/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ AGENT_PRIVATE_KEY: pk, VAULT_ACTIVE: 'false' }) });
-        location.reload();
-      }
       async function saveAlchemy() {
         const v = document.getElementById('alchemyKey').value.trim();
         if (!v) return;
