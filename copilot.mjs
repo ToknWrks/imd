@@ -54,6 +54,7 @@ function ensureColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }
+ensureColumn("copilot_requests", "user_id", "user_id TEXT"); // owning user (Phase 2 isolation)
 
 // ── SSE clients (dashboard tabs) ─────────────────────────────────────────────
 const sseClients = new Set();
@@ -132,15 +133,15 @@ export function getRequest(id) {
  * Create a pending request and wait for the user's browser signature.
  * Resolves to the tx hash; rejects on decline/timeout/server shutdown.
  */
-function awaitBrowserSignature({ chain, kind, product, symbol, summary, to, value, data }) {
+function awaitBrowserSignature({ chain, kind, product, symbol, summary, to, value, data, userId = null }) {
   const id = `cp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const dep = getChain(chain);
   const timeoutMs = copilotTimeoutMs();
 
   db.prepare(`
-    INSERT INTO copilot_requests (id, chain, kind, product, symbol, summary, to_address, value_wei, data)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, chain, kind, product, symbol ?? null, summary ?? null, to, value.toString(), data);
+    INSERT INTO copilot_requests (id, chain, kind, product, symbol, summary, to_address, value_wei, data, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, chain, kind, product, symbol ?? null, summary ?? null, to, value.toString(), data, userId);
 
   const payload = {
     id, chain, chainId: dep.viemChain.id, chainName: dep.name,
@@ -161,9 +162,14 @@ function awaitBrowserSignature({ chain, kind, product, symbol, summary, to, valu
 }
 
 /** Browser approved + broadcast the tx — settle the waiter. */
-export function resolveRequest(id, txHash) {
+export function resolveRequest(id, txHash, resolvedBy = null) {
   const row = getRequest(id);
   if (!row || row.status !== "pending") return { ok: false, error: "request not pending" };
+  // Isolation: only the owning user's session may resolve (another user's
+  // browser session can't approve someone else's trade).
+  if (row.user_id && resolvedBy && String(resolvedBy).toLowerCase() !== String(row.user_id).toLowerCase()) {
+    return { ok: false, error: "not your sign request" };
+  }
   const w = waiters.get(id);
   if (!w) return { ok: false, error: "no waiter (server restarted?)" };
   clearTimeout(w.timer);
@@ -176,9 +182,12 @@ export function resolveRequest(id, txHash) {
 }
 
 /** Browser (or API) declined — reject so the engine's catch logs the skip. */
-export function declineRequest(id, reason = "declined by user in browser") {
+export function declineRequest(id, reason = "declined by user in browser", declinedBy = null) {
   const row = getRequest(id);
   if (!row || row.status !== "pending") return { ok: false, error: "request not pending" };
+  if (row.user_id && declinedBy && String(declinedBy).toLowerCase() !== String(row.user_id).toLowerCase()) {
+    return { ok: false, error: "not your sign request" };
+  }
   expire(id, "declined", reason);
   console.log(`[copilot] 🚫 request ${id} declined`);
   return { ok: true };
@@ -195,10 +204,24 @@ const _copilotSigners = new Map();
  * signer.address stay correct.
  */
 export async function buildCoPilotSigner(chainKey = "ethereum") {
-  if (_copilotSigners.has(chainKey)) return _copilotSigners.get(chainKey);
+  // Legacy/system co-pilot signer — signs for the CONNECTED_WALLET env user.
+  // Multi-user callers use buildCoPilotSignerFor(userId, chainKey) instead.
+  const connected = process.env.CONNECTED_WALLET;
+  return buildCoPilotSignerFor(connected, chainKey);
+}
+
+/**
+ * Per-user co-pilot signer (Phase 2): sign requests are stamped user_id so the
+ * dashboard only surfaces THIS user's approvals, and the queued request can't
+ * be resolved by another user's browser session.
+ */
+export async function buildCoPilotSignerFor(userId, chainKey = "ethereum") {
+  if (!userId) throw new Error("co-pilot signer needs a user id (the connected wallet address)");
+  const cacheKey = `${userId}:${chainKey}`;
+  if (_copilotSigners.has(cacheKey)) return _copilotSigners.get(cacheKey);
   const p = (async () => {
     const dep = getChain(chainKey);
-    const connected = process.env.CONNECTED_WALLET;
+    const connected = userId.toLowerCase();
     if (!connected) throw new Error("Co-pilot mode needs a connected wallet — click Connect wallet in the header first");
     const { createPublicClient, http, encodeFunctionData } = await import("viem");
     const publicClient = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
@@ -231,13 +254,14 @@ export async function buildCoPilotSigner(chainKey = "ethereum") {
           to: contractAddress,
           value: value ?? 0n,
           data,
+          userId,
         });
       },
     };
     console.log(`[copilot] signer active on ${dep.name} — trades wait for browser approval from ${connected}`);
     return signer;
   })();
-  _copilotSigners.set(chainKey, p);
+  _copilotSigners.set(cacheKey, p);
   return p;
 }
 

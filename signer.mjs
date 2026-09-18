@@ -19,7 +19,50 @@ function getHttpRpcUrl(chainKey = "ethereum") {
 
 const VAULT_CHAIN_NAMES = { ethereum: "Ethereum", base: "Base" };
 
+// Signer cache — key: `${userId ?? "system"}:${chainKey}`. Per-user isolation
+// (Phase 2): each user's autonomy-mode session key builds its own signer; the
+// system signer (env config) lives under the "system" key. resolveSignerUser
+// resolves a SPECIFIC user's signer; resolveSigner stays env-configured for
+// backward compatibility (local single-user mode).
 const _signerPromises = new Map();
+
+// ── Per-user autonomy signer (Phase 2 multi-user) ───────────────────────────
+/**
+ * Resolve a specific USER's signer. Modes:
+ *   - 'copilot'  → the co-pilot signer (browser wallet approves; no server key)
+ *   - 'autonomy' → that user's own smart account, derived from THEIR encrypted
+ *                  session key (users.mjs). Falls back to an error when unset.
+ * 'system' matches the legacy env-driven behavior exactly.
+ */
+export async function resolveSignerUser(userId, chainKey = "ethereum") {
+  if (!userId || userId === "system") return resolveSigner(chainKey);
+  const { getUser } = await import("./users.mjs");
+  const user = getUser(userId);
+  if (!user) throw new Error(`unknown user ${userId}`);
+  if (user.disabled === 1) throw new Error("account disabled");
+
+  const mode = user.signer_mode || "copilot";
+  const cacheKey = `${userId}:${chainKey}`;
+  if (_signerPromises.has(cacheKey)) return _signerPromises.get(cacheKey);
+
+  const p = (async () => {
+    if (mode === "copilot") {
+      const { buildCoPilotSignerFor } = await import("./copilot.mjs");
+      return buildCoPilotSignerFor(userId, chainKey);
+    }
+    if (mode === "autonomy") {
+      const sessionKey = (await import("./users.mjs")).getUserSecret(userId, "session");
+      if (!sessionKey) throw new Error(`user ${userId.slice(0, 6)}…${userId.slice(-4)} has autonomy mode but no session key stored — set one in Settings`);
+      // Per-user session key passed directly — no env swap needed; the client
+      // cache in smart-account.mjs keys on the session key so users can't collide.
+      const { buildSmartAccountSigner } = await import("./smart-account.mjs");
+      return buildSmartAccountSigner(chainKey, { sessionKey });
+    }
+    throw new Error(`unknown signer_mode "${mode}"`);
+  })();
+  _signerPromises.set(cacheKey, p);
+  return p;
+}
 
 /**
  * Signer for the Market Maker bot specifically. Uses MM_PRIVATE_KEY when set

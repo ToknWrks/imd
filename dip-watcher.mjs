@@ -42,7 +42,12 @@ const {
 } = await import("./db.mjs");
 const { findBestPool, getEthUsdPrice, buyToken, findBestV4Pool, findBestAerodromePool, findBestV3DollarPool, isDollarQuotedV3, resolvePoolOverride } = await import("./dip-swap.mjs");
 const { computeWalletPosition } = await import("./wallet-position.mjs");
-const { resolveSigner } = await import("./signer.mjs");
+const { resolveSigner, resolveSignerUser } = await import("./signer.mjs");
+
+/** Per-user signer: autonomy users get their own session-key SCW; co-pilot users enqueue browser approvals. */
+async function userSigner(watcher, chainKey) {
+  return resolveSignerUser(watcher.user_id || "system", chainKey);
+}
 const { getWsClient, getChain } = await import("./chains.mjs");
 const { startWatchdog, stopWatchdog, noteWsActivity } = await import("./ws-watchdog.mjs");
 const { alert } = await import("./notify.mjs");
@@ -271,7 +276,7 @@ async function handleV4Swap(watcher, pool, log) {
   touchDipWatcherTriggered(watcher.id);
 
   try {
-    const signer = await resolveSigner(chainKey);
+    const signer = await userSigner(watcher, chainKey);
     // Route by venue: dollar-quote pools are paid with the chain's dollar
     // token (no ETH side to settle); everything else pays with native ETH
     // (buyToken does the ETH pre-flight balance guard internally).
@@ -357,7 +362,7 @@ async function handleV3DollarSwap(watcher, pool, log) {
   touchDipWatcherTriggered(watcher.id);
 
   try {
-    const signer = await resolveSigner(chainKey);
+    const signer = await userSigner(watcher, chainKey);
     // Route by venue: buyToken picks the multi-hop (ETH→dollar→token) path
     // automatically for a V3 dollar-quoted venue.
     const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey });
@@ -464,7 +469,7 @@ async function handleAeroSwap(watcher, pool, log) {
   touchDipWatcherTriggered(watcher.id);
 
   try {
-    const signer = await resolveSigner(chainKey);
+    const signer = await userSigner(watcher, chainKey);
     // Execute via the standard Uniswap routing (buyToken) — smallest-slippage
     // venue for a small clip; the Aerodrome pool is only the *signal*.
     const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey });
@@ -545,7 +550,7 @@ async function handleSwap(watcher, wethIsToken0, log) {
   touchDipWatcherTriggered(watcher.id);
 
   try {
-    const signer = await resolveSigner(chainKey);
+    const signer = await userSigner(watcher, chainKey);
     // Route by venue (V3 path is always ETH-paid; buyToken does the balance guard)
     const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey });
     const tokenAmount = Number(formatUnits(quotedOut, watcher.decimals ?? 18));
@@ -595,7 +600,7 @@ async function runScheduledBuys() {
         amountUsd: strategy.base_buy_usd,
         scheduledFor: strategy.next_scheduled_at,
       });
-      const signer = await resolveSigner(chainKey);
+      const signer = await userSigner(strategy, chainKey);
       // Route by venue: dollar-quote pools pay with the chain's dollar token.
       const { txHash, quotedOut, eth_spent } = await buyToken(signer, strategy.contract_address, strategy.base_buy_usd, { slippagePct: strategy.slippage_pct, chainKey });
       const tokenAmount = Number(formatUnits(quotedOut, strategy.decimals ?? 18));
@@ -714,7 +719,7 @@ async function checkGasBalance() {
   const chains = new Set(getActiveDipWatchers().map((w) => w.chain || "ethereum"));
   for (const chainKey of chains) {
     try {
-      const signer = await resolveSigner(chainKey);
+      const signer = await resolveSigner(chainKey); // system signer: gas float is the operator's concern
       const balanceEth = Number(await signer.getEthBalanceWei()) / 1e18;
       if (balanceEth < threshold) {
         await alert(`low-gas-${chainKey}-${signer.address}`,
@@ -732,7 +737,7 @@ async function refreshPositions() {
   for (const w of getActiveDipWatchers()) {
     const chainKey = w.chain || "ethereum";
     try {
-      const signer = await resolveSigner(chainKey);
+      const signer = await userSigner(w, chainKey);
       const pos = await computeWalletPosition({ contractAddress: w.contract_address, decimals: w.decimals ?? 18, walletAddress: signer.address, chainKey });
       updateWalletPosition(w.id, {
         balance: pos.balance, balanceUsd: pos.balanceUsd, priceUsd: pos.priceUsd,

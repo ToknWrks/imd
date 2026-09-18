@@ -136,9 +136,14 @@ function requireAlchemyKey() {
  * SMART ACCOUNT address (counterfactual if undeployed), not the session key's
  * EOA — wallet-position scans, approvals, and trade rows all read it.
  */
-export async function buildSmartAccountSigner(chainKey = "ethereum") {
+export async function buildSmartAccountSigner(chainKey = "ethereum", { sessionKey = null } = {}) {
   const dep = getChain(chainKey);
-  const client = await getSmartAccountClient(chainKey);
+  // sessionKey override (Phase 2): per-user autonomy — the caller swaps env
+  // AA_SESSION_KEY OR passes the user's stored key directly; the client cache
+  // is keyed per session key so users never collide.
+  const client = sessionKey
+    ? await getSmartAccountClient(chainKey, { sessionKey })
+    : await getSmartAccountClient(chainKey);
   const address = getAddress(client.account.address);
   const publicClient = createPublicClient({
     chain: dep.viemChain,
