@@ -1807,8 +1807,8 @@ const server = createServer(async (req, res) => {
         const { mode } = JSON.parse(await readBody());
         if (!["copilot", "autonomy"].includes(mode)) return json({ ok: false, error: "mode must be copilot or autonomy" });
         if (mode === "autonomy") {
-          const { getUserSecret } = await import("./users.mjs");
-          if (!getUserSecret(uid, "session")) {
+          const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
+          if (!(await resolveUserSessionKeyAsync(uid))) {
             return json({ ok: false, error: "generate a session key first — autonomy needs one to sign trades" });
           }
         }

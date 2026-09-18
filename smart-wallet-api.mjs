@@ -358,6 +358,42 @@ export async function generateSessionKey(chainKey = "ethereum", { force = false 
  * by the caller (UI) for backup. Fund guard: blocks when the user's CURRENT
  * session-key account still holds funds (unless forced).
  */
+/**
+ * ONE key resolver for per-user trading wallets (unification, 2026-09-18):
+ * the REGISTRY (per-connected-wallet, Option 1) is the source of truth;
+ * the users-table session_key_enc is a legacy fallback for headless users
+ * with no registry record. Every consumer — signer resolution, settings
+ * display, slideout — must go through this so the two stores can't show
+ * (or sign with) different wallets. Settings' generate button dual-writes
+ * both stores to keep legacy consumers working.
+ */
+export function resolveUserSessionKey(userId) {
+  if (!userId || !/^0x[0-9a-fA-F]{40}$/.test(userId)) return null;
+  const rec = getWalletRecord(userId);
+  if (rec?.sessionKeyEnc) {
+    const sk = decryptSessionKey(rec.sessionKeyEnc);
+    if (sk) return sk;
+    // Unreadable registry key must NOT silently fall through to a different
+    // (users-table) key — that would sign trades from a wallet the registry
+    // doesn't know about. Surface the error instead.
+    throw new Error(`registry session key for ${userId.slice(0, 6)}…${userId.slice(-4)} is unreadable — fix MASTER_KEY / data/connected-wallets.json (funds-safety guard)`);
+  }
+  // Legacy fallback: users-table secret (pre-registry users, headless setups).
+  return null; // async import below — see resolveUserSessionKeyAsync
+}
+
+export async function resolveUserSessionKeyAsync(userId) {
+  if (!userId || !/^0x[0-9a-fA-F]{40}$/.test(userId)) return null;
+  const rec = getWalletRecord(userId);
+  if (rec?.sessionKeyEnc) {
+    const sk = decryptSessionKey(rec.sessionKeyEnc);
+    if (sk) return sk;
+    throw new Error(`registry session key for ${userId.slice(0, 6)}…${userId.slice(-4)} is unreadable — fix MASTER_KEY / data/connected-wallets.json (funds-safety guard)`);
+  }
+  const { getUserSecret } = await import("./users.mjs");
+  return getUserSecret(userId, "session");
+}
+
 export async function generateUserSessionKey(userId, chainKey = "ethereum", { force = false } = {}) {
   if (!userId) throw new Error("userId required");
   const { getUser, setUserSecret, getUserSecret } = await import("./users.mjs");
@@ -365,7 +401,9 @@ export async function generateUserSessionKey(userId, chainKey = "ethereum", { fo
   if (!user) throw new Error("unknown user");
 
   const { generatePrivateKey } = await import("viem/accounts");
-  const prevKey = getUserSecret(userId, "session");
+  // Unified resolver — the "current" key is whichever the registry (then the
+  // users table) actually holds, not just the users-table copy.
+  const prevKey = await resolveUserSessionKeyAsync(userId);
   const haveFunds = { eth: 0n, usd: 0n };
   if (prevKey) {
     try {
@@ -391,17 +429,30 @@ export async function generateUserSessionKey(userId, chainKey = "ethereum", { fo
   const client = await getSmartAccountClient(chainKey, { sessionKey });
   const address = getAddress(client.account.address);
 
+  // DUAL-WRITE both stores (2026-09-18 unification): the registry is the
+  // source of truth for connected wallets; the users-table copy keeps legacy
+  // headless consumers working. They must never hold DIFFERENT keys.
   setUserSecret(userId, "session", sessionKey);
+  const rec = getWalletRecord(userId);
+  setWalletRecord(userId, {
+    scwAddress: address,
+    sessionKeyAddress: getAddress(privateKeyToAccount(sessionKey).address),
+    ...(rec?.sessionKeyEnc ? {} : {}),
+    sessionKeyEnc: encryptSessionKey(sessionKey),
+    createdAt: rec?.createdAt,
+  });
   console.log(`[users] session key generated for ${userId.slice(0, 6)}…${userId.slice(-4)} — SCW ${address}`);
   return { ok: true, sessionKey, address };
 }
 
 /** Derive a user's SCW address + balances without exposing the key. */
 export async function getUserWalletStatus(userId, chainKey = "ethereum") {
-  const { getUser, getUserSecret } = await import("./users.mjs");
+  const { getUser } = await import("./users.mjs");
   const user = getUser(userId);
   if (!user) return { ok: false, error: "unknown user" };
-  const sessionKey = getUserSecret(userId, "session");
+  // Unified resolver (2026-09-18): registry first, users-table legacy
+  // fallback — settings and the slideout now ALWAYS show the same wallet.
+  const sessionKey = await resolveUserSessionKeyAsync(userId);
   if (!sessionKey) return { ok: true, hasKey: false, signerMode: user.signer_mode || "copilot" };
   const dep = getChain(chainKey);
   const pub = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
