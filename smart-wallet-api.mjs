@@ -295,20 +295,81 @@ export async function generateSessionKey(chainKey = "ethereum", { force = false 
 
   const sessionKey = generatePrivateKey();
   // Derive the SCW address for the fresh key without persisting anything —
-  // temporarily set the env so getSmartAccountClient() picks it up.
-  const prev = prevKey;
-  process.env.AA_SESSION_KEY = sessionKey;
-  invalidateSmartAccountClient(chainKey);            // bust the per-chain cache
+  // getSmartAccountClient accepts a sessionKey override; no env swap needed.
+  invalidateSmartAccountClient(chainKey);
   try {
-    const client = await getSmartAccountClient(chainKey);
+    const client = await getSmartAccountClient(chainKey, { sessionKey });
     const address = getAddress(client.account.address);
     return { ok: true, sessionKey, address, previousAccountHadFunds: funded };
   } finally {
-    if (prev === undefined) delete process.env.AA_SESSION_KEY;
-    else process.env.AA_SESSION_KEY = prev;
-    invalidateSmartAccountClient(chainKey);          // keep the cache honest either way
+    invalidateSmartAccountClient(chainKey);
+  }
+}
+
+/**
+ * Per-user session-key generation (Phase 2 multi-user). Generates a fresh
+ * burner key, derives the user's own SCW address, and stores the key
+ * ENCRYPTED in their users row (never in env). The plaintext is shown ONCE
+ * by the caller (UI) for backup. Fund guard: blocks when the user's CURRENT
+ * session-key account still holds funds (unless forced).
+ */
+export async function generateUserSessionKey(userId, chainKey = "ethereum", { force = false } = {}) {
+  if (!userId) throw new Error("userId required");
+  const { getUser, setUserSecret, getUserSecret } = await import("./users.mjs");
+  const user = getUser(userId);
+  if (!user) throw new Error("unknown user");
+
+  const { generatePrivateKey } = await import("viem/accounts");
+  const prevKey = getUserSecret(userId, "session");
+  const haveFunds = { eth: 0n, usd: 0n };
+  if (prevKey) {
+    try {
+      const dep = getChain(chainKey);
+      const pub = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
+      const curClient = await getSmartAccountClient(chainKey, { sessionKey: prevKey });
+      const curAddr = getAddress(curClient.account.address);
+      haveFunds.eth = await pub_getBalance(pub, curAddr);
+      const usdRaw = await getErc20Balance(dep.dollar, curAddr, chainKey).catch(() => null);
+      haveFunds.usd = usdRaw != null ? BigInt(usdRaw) : 0n;
+    } catch { /* can't read — don't block */ }
+  }
+  const funded = haveFunds.eth > 0n || haveFunds.usd > 0n;
+  if (prevKey && funded && !force) {
+    return {
+      ok: false,
+      blocked: "funds-present",
+      message: `Your current smart account holds funds. Generating a new key derives a NEW address — sweep the funds out first (wallet slideout → Move out), or confirm force.`,
+    };
   }
 
+  const sessionKey = generatePrivateKey();
+  const client = await getSmartAccountClient(chainKey, { sessionKey });
+  const address = getAddress(client.account.address);
+
+  setUserSecret(userId, "session", sessionKey);
+  console.log(`[users] session key generated for ${userId.slice(0, 6)}…${userId.slice(-4)} — SCW ${address}`);
+  return { ok: true, sessionKey, address };
+}
+
+/** Derive a user's SCW address + balances without exposing the key. */
+export async function getUserWalletStatus(userId, chainKey = "ethereum") {
+  const { getUser, getUserSecret } = await import("./users.mjs");
+  const user = getUser(userId);
+  if (!user) return { ok: false, error: "unknown user" };
+  const sessionKey = getUserSecret(userId, "session");
+  if (!sessionKey) return { ok: true, hasKey: false, signerMode: user.signer_mode || "copilot" };
+  const dep = getChain(chainKey);
+  const pub = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
+  const client = await getSmartAccountClient(chainKey, { sessionKey });
+  const address = getAddress(client.account.address);
+  const ethWei = await pub_getBalance(pub, address);
+  const usdRaw = await getErc20Balance(dep.dollar, address, chainKey).catch(() => null);
+  return {
+    ok: true, hasKey: true, signerMode: user.signer_mode || "copilot",
+    address, eth: Number(ethWei) / 1e18,
+    usd: usdRaw != null ? Number(usdRaw) / 10 ** (dep.dollarDecimals ?? 6) : null,
+    deployed: (await pub.getBytecode({ address })) !== "0x",
+  };
 }
 /**
  * POST /api/smart-wallet/move — { direction: "in"|"out", asset: "eth"|"usd", amount: number, chain }

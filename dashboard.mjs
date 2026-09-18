@@ -64,7 +64,8 @@ import { COPILOT_BADGE, COPILOT_JS } from "./copilot-ui.js";
 import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
 import { handleAuth, sessionAddress } from "./auth.mjs";
 import { walletApiHandler } from "./wallet-api.mjs";
-import { activateSmartWallet, moveFunds } from "./smart-wallet-api.mjs";
+import { activateSmartWallet, moveFunds, generateUserSessionKey, getUserWalletStatus } from "./smart-wallet-api.mjs";
+import { getUser, setUserField } from "./users.mjs";
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
 import { getMarketOverview } from "./zooch-data.mjs";
 import { listMmStrategies, computeMmPosition } from "./mm-db.mjs";
@@ -1030,22 +1031,24 @@ async function settingsPage(vaultMsg = "") {
         </select>
       </div>
       <div id="smartFields" style="${smartActive ? "" : "display:none"}">
-         <p class="hint">Signs via an Alchemy Modular Account using a burner session key held on this machine. Phase 1: the session key IS the account owner — cap exposure by funding only the plan budget + gas. Phase 2 (on-chain spend caps via SessionKeyPlugin) tracked in docs/smart-account-signer.md.</p>
-        ${smartAddress
-          ? `<p>✓ Smart account derived — <code>${smartAddress}</code> <span class="hint">(fund THIS address from the wallet slideout; first UserOperation deploys it)</span></p>`
-          : `<p class="hint">No smart account yet — generate a session key below (or paste an existing one).</p>`}
-        ${smartModeNote ? `<p class="hint" style="color:#f87171">${esc(smartModeNote)}</p>` : ""}
-        <div class="field"><label>AA_SESSION_KEY (0x-prefixed)</label><input id="aaSessionKey" type="password" placeholder="${aaSessionKey ? aaSessionKey.slice(0, 6) + "…" : "0x..."}"></div>
+        <div id="userWalletBox">
+          <p class="hint">Loading your trading wallet…</p>
+        </div>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-          <button onclick="saveAaKey()">Save session key</button>
-          <button class="secondary" onclick="generateAaKey(this)" title="Generates a fresh burner key on this machine, saves it to .env, and shows it ONCE for backup.">${aaSessionKey ? "Regenerate key" : "Generate a session key"}</button>
+          <button onclick="generateUserKey(this)">${"Generate a session key"}</button>
+          <button class="secondary" onclick="regenerateUserKey(this)" title="Derives a NEW address — sweep funds out of the old one first.">Regenerate key</button>
         </div>
-        <div id="aaGenResult" style="display:none;margin-top:0.6rem;padding:0.6rem 0.7rem;background:rgba(74,222,128,0.07);border:1px solid rgba(74,222,128,0.3);border-radius:4px">
-          <p class="hint" style="margin:0 0 0.4rem"><b style="color:#4ade80">Key generated and saved.</b> Back it up NOW — it is shown only once:</p>
-          <code id="aaGenKey" style="display:block;word-break:break-all;font-size:0.72rem;color:#e8eaed;user-select:all"></code>
-          <p class="hint" style="margin:0.4rem 0 0">Smart account address: <code id="aaGenAddr"></code> — fund it with the plan budget + gas.</p>
+        <div id="userKeyGenResult" style="display:none;margin-top:0.6rem;padding:0.6rem 0.7rem;background:rgba(74,222,128,0.07);border:1px solid rgba(74,222,128,0.3);border-radius:4px">
+          <p class="hint" style="margin:0 0 0.4rem"><b style="color:#4ade80">Session key generated and stored (encrypted).</b> Back it up NOW — it is shown only once:</p>
+          <code id="userGenKey" style="display:block;word-break:break-all;font-size:0.72rem;color:#e8eaed;user-select:all"></code>
+          <p class="hint" style="margin:0.4rem 0 0">Your smart account: <code id="userGenAddr"></code> — fund it with your plan budget + gas. Same key = same address, always.</p>
         </div>
-        <p class="hint" style="margin-top:0.5rem">Uses the ALCHEMY_API_KEY saved in the RPC section below — the same key powers the bundler.</p>
+        <div style="margin-top:0.8rem">
+          <label style="font-size:0.85rem"><input type="radio" name="userSignerMode" value="copilot" checked> Co-pilot — approve every trade in the browser</label><br>
+          <label style="font-size:0.85rem"><input type="radio" name="userSignerMode" value="autonomy"> Autonomy — server signs with my session key (requires a generated key above)</label>
+        </div>
+        <button onclick="saveUserSignerMode(this)" style="margin-top:0.5rem">Save signer mode</button>
+        <p class="hint" style="margin-top:0.5rem">Uses the platform ALCHEMY_API_KEY for the bundler/RPC. Your session key is stored AES-256-GCM encrypted; back it up when shown — it is a wallet seed.</p>
       </div>
       <div id="legacyFields" style="${!smartActive ? "" : "display:none"}">
         <p class="hint" style="color:#e8b661">Legacy signing — kept for headless setups only. The header <b>Connect wallet</b> + smart-wallet flow replaces this for interactive use.</p>
@@ -1157,6 +1160,77 @@ async function settingsPage(vaultMsg = "") {
         document.getElementById('vaultFields').style.display = legacy === 'vault' ? '' : 'none';
         fetch('/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ VAULT_ACTIVE: legacy === 'vault' ? 'true' : 'false' }) });
       }
+      // ── Per-user trading wallet (session key + SCW) ──────────────────────
+      async function loadUserWallet() {
+        const box = document.getElementById('userWalletBox');
+        try {
+          const r = await fetch('/api/user/wallet');
+          if (r.status === 401) { location.reload(); return; }
+          const j = await r.json();
+          if (!j.ok) { box.innerHTML = '<p class="hint" style="color:#f87171">' + (j.error || 'unavailable') + '</p>'; return; }
+          if (!j.hasKey) {
+            box.innerHTML = '<p class="hint">No session key yet — click <b>Generate a session key</b> below. Your key derives YOUR OWN smart account; fund that address with your plan budget + gas.</p>'
+              + '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b></p>';
+            document.querySelector('input[name="userSignerMode"][value="' + (j.signerMode === 'autonomy' ? 'autonomy' : 'copilot') + '"]').checked = true;
+            return;
+          }
+          box.innerHTML =
+            '<p>✓ Your smart account — <code>' + j.address + '</code></p>' +
+            '<p class="hint">Balance: ' + j.eth.toFixed(6) + ' ETH' + (j.usd != null ? ' · ' + j.usd.toFixed(2) + ' USD' : '') + ' · ' + (j.deployed ? 'deployed' : 'not yet deployed (first trade deploys it)') + '</p>' +
+            '<p class="hint">Fund THIS address from the wallet slideout. Same key = same address, always.</p>' +
+            '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b></p>';
+          document.querySelector('input[name="userSignerMode"][value="' + (j.signerMode || 'copilot') + '"]').checked = true;
+        } catch (e) {
+          box.innerHTML = '<p class="hint" style="color:#f87171">' + (e.message || e) + '</p>';
+        }
+      }
+      async function generateUserKey(btn) {
+        if (!confirm('Generate a session key? It is stored encrypted on the server and shown ONCE below — back it up immediately. It is a wallet seed.')) return;
+        btn.disabled = true; btn.textContent = 'Generating…';
+        try {
+          const r = await fetch('/api/user/session-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+          const j = await r.json();
+          if (!j.ok) throw new Error(j.error || j.message || 'generation failed');
+          document.getElementById('userGenKey').textContent = j.sessionKey;
+          document.getElementById('userGenAddr').textContent = j.address;
+          document.getElementById('userKeyGenResult').style.display = '';
+          btn.textContent = 'Regenerate key';
+          loadUserWallet();
+        } catch (e) {
+          alert('Generation failed: ' + (e.message || e));
+        } finally { btn.disabled = false; }
+      }
+      async function regenerateUserKey(btn) {
+        if (!confirm('Regenerate? Your NEW smart account is a different address. Sweep funds out of the old account first (wallet slideout → Move out).')) return;
+        btn.disabled = true; btn.textContent = 'Generating…';
+        try {
+          let r = await fetch('/api/user/session-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
+          let j = await r.json();
+          if (!j.ok && j.blocked === 'funds-present') {
+            if (!confirm(j.message + '\\n\\nOverride and generate anyway? The old account stays owned by your old key backup (recoverable), but the app will track the new empty account.')) { btn.disabled = false; btn.textContent = 'Regenerate key'; return; }
+            r = await fetch('/api/user/session-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ force: true }) });
+          }
+          const j2 = await r.json();
+          if (!j2.ok) throw new Error(j2.error || j2.message || 'generation failed');
+          document.getElementById('userGenKey').textContent = j2.sessionKey;
+          document.getElementById('userGenAddr').textContent = j2.address;
+          document.getElementById('userKeyGenResult').style.display = '';
+          loadUserWallet();
+        } catch (e) { alert('Generation failed: ' + (e.message || e)); }
+        finally { btn.disabled = false; btn.textContent = 'Regenerate key'; }
+      }
+      async function saveUserSignerMode(btn) {
+        const mode = document.querySelector('input[name="userSignerMode"]:checked').value;
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/user/signer-mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode }) });
+          const j = await r.json();
+          if (!j.ok) { alert(j.error); return; }
+          location.reload();
+        } catch (e) { alert(e.message || e); }
+        finally { btn.disabled = false; }
+      }
+      loadUserWallet();
       async function saveAaKey() {
         const v = document.getElementById('aaSessionKey').value.trim();
         if (!v) return;
@@ -1797,6 +1871,41 @@ const server = createServer(async (req, res) => {
     if (url === "/trades" && method === "GET") return send(tradesPage(sessionAddress(req)));
     if (url === "/settings" && method === "GET") return send(await settingsPage());
 
+    // ── Per-user trading wallet (session key / SCW) ────────────────────────
+    if (url === "/api/user/wallet" && method === "GET") {
+      try {
+        const uid = sessionAddress(req);
+        if (!uid) return json({ ok: false, error: "authentication required" }, 401);
+        return json(await getUserWalletStatus(uid, "ethereum"));
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    if (url === "/api/user/session-key" && method === "POST") {
+      try {
+        const uid = sessionAddress(req);
+        if (!uid) return json({ ok: false, error: "authentication required" }, 401);
+        const body = JSON.parse(await readBody() || "{}");
+        const r = await generateUserSessionKey(uid, "ethereum", { force: body.force === true });
+        return json(r);
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    // Per-user signer mode toggle (autonomy requires a stored session key)
+    if (url === "/api/user/signer-mode" && method === "POST") {
+      try {
+        const uid = sessionAddress(req);
+        if (!uid) return json({ ok: false, error: "authentication required" }, 401);
+        const { mode } = JSON.parse(await readBody());
+        if (!["copilot", "autonomy"].includes(mode)) return json({ ok: false, error: "mode must be copilot or autonomy" });
+        if (mode === "autonomy") {
+          const { getUserSecret } = await import("./users.mjs");
+          if (!getUserSecret(uid, "session")) {
+            return json({ ok: false, error: "generate a session key first — autonomy needs one to sign trades" });
+          }
+        }
+        setUserField(uid, "signer_mode", mode);
+        return json({ ok: true, mode });
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+
     // ── Co-pilot mode: SSE stream + approval endpoints ─────────────────────
     if (url === "/api/copilot/stream" && method === "GET") {
       const remove = addSseClient(res);
@@ -1804,7 +1913,9 @@ const server = createServer(async (req, res) => {
       return; // SSE — response stays open; do NOT fall through to other handlers
     }
     if (url === "/api/copilot/pending" && method === "GET") {
-      return json({ ok: true, active: isCopilotActive(), count: pendingCount(), requests: listPending() });
+      const uid = sessionAddress(req);
+      const requests = uid ? listPending().filter((r) => !r.user_id || r.user_id === uid) : listPending();
+      return json({ ok: true, active: isCopilotActive(), count: requests.length, requests });
     }
     if (url === "/api/copilot/history" && method === "GET") {
       return json({ ok: true, requests: listRecent(30) });
@@ -1813,7 +1924,7 @@ const server = createServer(async (req, res) => {
       try {
         const { id, txHash } = JSON.parse(await readBody());
         if (!id || !txHash) return json({ ok: false, error: "id and txHash required" });
-        const r = resolveRequest(id, txHash);
+        const r = resolveRequest(id, txHash, sessionAddress(req));
         return json(r.ok ? r : { ...r }, r.ok ? 200 : 409);
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
@@ -1821,7 +1932,7 @@ const server = createServer(async (req, res) => {
       try {
         const { id, reason } = JSON.parse(await readBody());
         if (!id) return json({ ok: false, error: "id required" });
-        const r = declineRequest(id, reason || "declined by user in browser");
+        const r = declineRequest(id, reason || "declined by user in browser", sessionAddress(req));
         return json(r, r.ok ? 200 : 409);
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
