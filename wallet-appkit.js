@@ -35,8 +35,12 @@ export function APPKIT_SCRIPT(projectId, rpcUrl) {
   window.appKitModal = modal;
 
   window.appKitConnect = async function appKitConnect() {
-    await modal.open();
+    modal.open();
+    // Check current state first (pre-connected wallets don't re-fire the state subscription)
+    const getAddr = () => modal.getAddress?.() || modal.getState?.()?.address;
     const address = await new Promise((resolve, reject) => {
+      const immediate = getAddr();
+      if (immediate) { resolve(immediate); return; }
       const timeout = setTimeout(() => reject(new Error('No wallet connected within 120s')), 120000);
       const unsub = modal.subscribeState((state) => {
         if (state.address) { unsub(); clearTimeout(timeout); resolve(state.address); }

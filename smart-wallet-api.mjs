@@ -250,17 +250,26 @@ export async function smartWalletStatus(chainKey = "ethereum", { statusConnected
   // Live max-sendable: build the outbound UO (no send) and subtract its exact
   // gas cost from the SCW's balance. Errors are non-fatal — UI falls back to
   // clamping at move time.
-  if (scw && !scw.error && scw.ethRaw > 0n) {
+  // GUARD (2026-09-18): owner can be an {error} object when the owner-signer
+  // fallback fails (no AGENT_PRIVATE_KEY on hosted, AA resolution failure) —
+  // owner.address is then undefined and buildUserOperation THREW
+  // InvalidAddressError synchronously past this try/catch, killing the whole
+  // server on every slideout poll without a browser wallet param.
+  const ownerAddr = owner && /^0x[0-9a-fA-F]{40}$/.test(owner.address || "") ? owner.address : null;
+  if (ownerAddr && scw && !scw.error && scw.ethRaw > 0n) {
     try {
       const scwClient = await getSmartAccountClient(chainKey);
-      const to = owner.address;
-      const built = await scwClient.buildUserOperation({ uo: { target: to, data: "0x", value: scw.ethRaw } });
+      const built = await scwClient.buildUserOperation({ uo: { target: ownerAddr, data: "0x", value: scw.ethRaw } });
       const gasCost = BigInt(built.preVerificationGas) +
         BigInt(built.verificationGasLimit) * BigInt(built.maxFeePerGas) +
         BigInt(built.callGasLimit) * BigInt(built.maxFeePerGas);
       const max = scw.ethRaw > gasCost ? scw.ethRaw - gasCost : 0n;
       out.maxSendableEth = Number(max) / 1e18;
-    } catch { /* non-fatal */ }
+    } catch (e) {
+      // Belt-and-braces: ANY failure here must degrade the field, never the
+      // process (the previous crash took pm2 down with it).
+      console.error("[smart-wallet] maxSendableEth build failed (non-fatal):", String(e.shortMessage || e.message).slice(0, 120));
+    }
   }
   return out;
 }
