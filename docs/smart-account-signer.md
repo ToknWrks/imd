@@ -1,5 +1,12 @@
 # Scope — Alchemy Smart-Account signer mode (server-side session key)
 
+> **Status: IMPLEMENTED & LIVE (as of 2026-09-17).** The interactive signer
+> path is Connect wallet → browser-signed funding → MultiOwnerLightAccount
+> smart wallet (session-key-signed UserOperations). The build order below is
+> historical; the as-built state lives in `CLAUDE.md` § "Wallet-Connect &
+> Smart Account (2026-09-17 migration)". Phase 2 (on-chain session-key
+> policy) remains future work.
+
 Decision: for VPS hosting, replace the vault-file model with an ERC-4337
 smart account (Alchemy Account Kit, Modular Account v2 — the exact stack
 rangedesk runs in `src/lib/wallet/smart-account.ts`). Owner key stays
@@ -36,33 +43,42 @@ AA mode maps onto that interface exactly:
 
 | File | Change |
 |---|---|
-## Account type change (2026-09-17, during the funded dry-run)
-
-Original plan used ModularAccountV2 (rangedesk's type). During the funded
-dry-run it failed `AA23 reverted / UnrecognizedFunction(0x00000000)` at
-`eth_estimateUserOperationGas` — reproduced with the SDK's OWN client + fresh
-key on both mainnet and sepolia: an Alchemy contract/SDK drift in MA v2's
-plugin init (SDK 4.88.5, latest as of this date), not our config.
-
-**Switched to LightAccount v2** (`createLightAccountClient`) — same middleware,
-same interface shim, builds cleanly on mainnet and sepolia. Phase 1 semantics
-are identical: the burner session key owns the account directly. Consequences:
-
-- The SCW address **changes** (counterfactual derivation differs per account
-  type). Any ETH sent to the old MA v2 address (0x7182…8Ad4, 0.004 ETH) is
-  stranded until MA v2 deploys — recoverable later, not lost, but plan around
-  the new address.
-- Phase 2 session-key policies: LightAccount has its own plugin path; revisit
-  when we get there (or when MA v2 drift is fixed upstream).
-
 | `signer.mjs` | New `SMART_ACCOUNT_ACTIVE=true` branch: builds the AA client from a server-side session-key WalletClient (`WalletClientSigner`), returns the standard interface. Memoized per chain like the others. |
-| `smart-account.mjs` (new) | LightAccount v2 signer backend: `alchemyTransportFor`, client factory, `gasReserveWei()`, `explainUserOpError()`. No React, no AppKit — server-only. |
+| `smart-account.mjs` (new) | **MultiOwnerLightAccount** signer backend: `alchemyTransportFor`, client factory, `gasReserveWei()`, `explainUserOpError()`. No React, no AppKit — server-only. |
 | `scripts/deploy-smart-account.mjs` (new) | One-time owner-side helper: derives the counterfactual SCW address for the owner, prints it, optionally deploys (factory tx signed by an owner key entered on the *local* machine, never pasted to the VPS). |
 | `scripts/test-aa-execution.mjs` (new) | Dry-run ladder, mirroring `test-v4-execution.mjs`: builds the real UO for a configured buy, `eth_estimateUserOperationGas` via the bundler, sends NOTHING. Must share the same build function the live path uses (the `test-v4-execution` lesson). |
 | `dashboard.mjs` (Settings tab) | Smart-account section: show SCW address, session-key address, policy (cap/expiry), deploy + fund status. Read-only at first. |
-| `.env.example` | `SMART_ACCOUNT_ACTIVE`, `AA_OWNER_ADDRESS`, `AA_SESSION_KEY`, `AA_ALCHEMY_GAS_POLICY_ID` (optional paymaster). |
+| `.env.example` | `SMART_ACCOUNT_ACTIVE`, `AA_SESSION_KEY` (as-built: `AA_OWNER_ADDRESS` / `AA_ALCHEMY_GAS_POLICY_ID` were not needed in Phase 1). |
 | `package.json` | `@aa-sdk/core`, `@account-kit/infra`, `@account-kit/smart-contracts` `^4.88.5` (pinned to rangedesk's versions — known-good on mainnet + Base). |
 | `docs/vps-deploy.md` | §0 rewrite: session-key model replaces the vault model for the VPS path; vault section stays for the local machine. |
+
+## Account type history (2026-09-17, during the funded dry-run)
+
+The plan went through two account types before landing on the final one —
+recorded here because each switch reshuffles the counterfactual SCW address:
+
+1. **ModularAccount v2 (original plan)** — during the funded dry-run it failed
+   `AA23 reverted / UnrecognizedFunction(0x00000000)` at
+   `eth_estimateUserOperationGas` — reproduced with the SDK's OWN client + fresh
+   key on both mainnet and sepolia: an Alchemy contract/SDK drift in MA v2's
+   plugin init (SDK 4.88.5, latest as of this date), not our config. Its
+   factory additionally **silently no-ops when `msg.sender ≠ owner`** — our
+   Activate button deployed from the vault while passing the session key as
+   owner: two txs "succeeded" (25k gas, zero logs, no code created). Full
+   lesson in `CLAUDE.md` § MA v2 factory lesson.
+2. **LightAccount v2 (interim)** — same middleware, same interface shim,
+   builds cleanly on mainnet and sepolia; abandoned derivation (`0xFB11…b9c5`),
+   never funded.
+3. **MultiOwnerLightAccount (final, implemented & working)** — the current
+   backend in `smart-account.mjs`. Owned by the burner session key
+   (`AA_SESSION_KEY`); multi-owner semantics mean a replaced/rotated key keeps
+   on-chain authority over its account, so funds are never truly lost — just
+   out of the app's view until the old key is re-imported (see the address
+   ledger in `CLAUDE.md`; current account `0xF4a6…23Fa`, unfunded-then-live
+   via the browser-signed Fund flow). Phase 1 semantics as planned: the
+   session key owns the account directly; Phase 2 session-key policies will
+   use the LightAccount plugin path — revisit when we get there (or when MA v2
+   drift is fixed upstream).
 
 `dip-swap.mjs`, `dip-watcher.mjs`, `sniper-*`, `sell-probe.mjs`,
 `wallet-position.mjs`: **no changes** — they consume the interface only.
