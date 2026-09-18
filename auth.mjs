@@ -41,9 +41,16 @@ function readEnvLine(key) {
   return m?.[1]?.trim() ?? "";
 }
 
-/** The one wallet allowed to sign in. ALLOWED_WALLET > CONNECTED_WALLET. */
+/**
+ * Legacy single-user pin. ONLY ALLOWED_WALLET is honored — the CONNECTED_WALLET
+ * fallback is gone (Phase 2): on the hosted multi-user app, CONNECTED_WALLET is
+ * just "the wallet some user connected in a browser" and pinning login to it
+ * blocked everyone else from registering. Registration (users table +
+ * REGISTRATION mode) governs access now; set ALLOWED_WALLET only if you want
+ * to hard-pin the door to one wallet.
+ */
 export function allowedWallet() {
-  return (envValue("ALLOWED_WALLET") || envValue("CONNECTED_WALLET") || "").toLowerCase() || null;
+  return envValue("ALLOWED_WALLET").toLowerCase() || null;
 }
 
 // ── Session token: <issuedMs>.<addr>.<hmac(issued|addr|ttl)> ─────────────────
