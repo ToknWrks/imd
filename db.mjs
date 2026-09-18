@@ -139,6 +139,43 @@ ensureColumn("zooch_reviews", "chain", "chain TEXT NOT NULL DEFAULT 'ethereum'")
 // on the Sniper page (buys record eth_spent; sells now record eth_received).
 ensureColumn("sniper_trades", "eth_received", "eth_received REAL");
 
+// ── Multi-user isolation (Phase 2): every user-owned table carries user_id.
+// Existing rows default to the admin wallet — the first user in `users` (or
+// ALLOWED_WALLET/CONNECTED_WALLET when users is empty). New writes stamp the
+// session wallet. All dashboard reads scope by it; the watcher copies it from
+// the watcher row into trade rows.
+import { readFileSync as _rf } from "fs";
+function _defaultUserId() {
+  try {
+    const u = db.prepare(`SELECT wallet_address FROM users ORDER BY is_admin DESC, created_at ASC LIMIT 1`).get();
+    if (u) return u.wallet_address;
+  } catch {}
+  const m = _rf(resolve(__dirname, ".env"), "utf8").match(/^ALLOWED_WALLET=(.*)$/m) || _rf(resolve(__dirname, ".env"), "utf8").match(/^CONNECTED_WALLET=(.*)$/m);
+  return m?.[1]?.trim().toLowerCase() ?? null;
+}
+ensureColumn("dip_watchers", "user_id", "user_id TEXT");
+ensureColumn("dip_trades", "user_id", "user_id TEXT");
+ensureColumn("accumulation_strategies", "user_id", "user_id TEXT");
+ensureColumn("strategy_executions", "user_id", "user_id TEXT");
+ensureColumn("sniper_trades", "user_id", "user_id TEXT");
+ensureColumn("sniper_recent_tokens", "user_id", "user_id TEXT");
+ensureColumn("copilot_requests", "user_id", "user_id TEXT");
+ensureColumn("zooch_reviews", "user_id", "user_id TEXT");
+ensureColumn("gas_spend", "user_id", "user_id TEXT");
+
+// One-time backfill: rows created before isolation get the admin/first user so
+// they don't vanish from the owner's view.
+try {
+  const _defUser = _defaultUserId();
+  if (_defUser) {
+    for (const t of ["dip_watchers", "dip_trades", "accumulation_strategies", "strategy_executions", "sniper_trades", "copilot_requests", "zooch_reviews"]) {
+      db.prepare(`UPDATE ${t} SET user_id = ? WHERE user_id IS NULL`).run(_defUser);
+    }
+    db.prepare(`UPDATE sniper_recent_tokens SET user_id = ? WHERE user_id IS NULL`).run(_defUser);
+  }
+} catch (e) {
+  console.error(`[db] isolation backfill skipped: ${e.message}`);
+}
 // Sniper token memory: every token entered (checked liquidity) is remembered
 // per chain, and one token per chain is "active" — the bot's current target.
 // The active token auto-resumes on page load / chain switch until a different
@@ -272,11 +309,13 @@ export function getSniperAutoSells(chain, limit = 10) {
 
 // ── Watchers ──────────────────────────────────────────────────────────────────
 
-export function getDipWatchers() {
+export function getDipWatchers(userId = null) {
+  if (userId) return db.prepare("SELECT * FROM dip_watchers WHERE user_id = ? ORDER BY created_at DESC").all(userId);
   return db.prepare("SELECT * FROM dip_watchers ORDER BY created_at DESC").all();
 }
 
-export function getActiveDipWatchers() {
+export function getActiveDipWatchers(userId = null) {
+  if (userId) return db.prepare("SELECT * FROM dip_watchers WHERE active = 1 AND user_id = ?").all(userId);
   return db.prepare("SELECT * FROM dip_watchers WHERE active = 1").all();
 }
 
@@ -284,11 +323,11 @@ export function getDipWatcher(id) {
   return db.prepare("SELECT * FROM dip_watchers WHERE id = ?").get(id);
 }
 
-export function addDipWatcher({ id, chain = "ethereum", contractAddress, symbol, decimals = 18, thresholdUsd, buyAmountUsd, slippagePct = 3, cooldownMinutes = 15, poolAddress = null }) {
+export function addDipWatcher({ id, chain = "ethereum", contractAddress, symbol, decimals = 18, thresholdUsd, buyAmountUsd, slippagePct = 3, cooldownMinutes = 15, poolAddress = null, userId = null }) {
   db.prepare(`
-    INSERT INTO dip_watchers (id, chain, contract_address, symbol, decimals, threshold_usd, buy_amount_usd, slippage_pct, cooldown_minutes, pool_address)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, chain, contractAddress.toLowerCase(), symbol ?? null, decimals ?? 18, thresholdUsd, buyAmountUsd, slippagePct ?? 3, cooldownMinutes ?? 15, poolAddress);
+    INSERT INTO dip_watchers (id, chain, contract_address, symbol, decimals, threshold_usd, buy_amount_usd, slippage_pct, cooldown_minutes, pool_address, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, chain, contractAddress.toLowerCase(), symbol ?? null, decimals ?? 18, thresholdUsd, buyAmountUsd, slippagePct ?? 3, cooldownMinutes ?? 15, poolAddress, userId);
 }
 
 export function setDipWatcherActive(id, active) {
@@ -340,14 +379,17 @@ export function isDipWatcherCoolingDown(id) {
 
 // ── Trades ────────────────────────────────────────────────────────────────────
 
-export function insertDipTrade({ watcher_id, sell_tx_hash, sell_usd, buy_tx_hash, eth_spent, token_amount, price_usd, strategy_id = null, execution_kind = null, status = "ok", error = null }) {
+export function insertDipTrade({ watcher_id, sell_tx_hash, sell_usd, buy_tx_hash, eth_spent, token_amount, price_usd, strategy_id = null, execution_kind = null, status = "ok", error = null, user_id = null }) {
+  // user_id: passed from the watcher (copied from the watcher row) or derived
+  // from the watcher when a dashboard caller omits it.
+  const uid = user_id ?? db.prepare("SELECT user_id FROM dip_watchers WHERE id = ?").get(watcher_id)?.user_id ?? null;
   db.prepare(`
-    INSERT INTO dip_trades (watcher_id, sell_tx_hash, sell_usd, buy_tx_hash, eth_spent, token_amount, price_usd, strategy_id, execution_kind, status, error)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(watcher_id, sell_tx_hash ?? null, sell_usd ?? null, buy_tx_hash ?? null, eth_spent ?? null, token_amount ?? null, price_usd ?? null, strategy_id, execution_kind, status, error);
+    INSERT INTO dip_trades (watcher_id, sell_tx_hash, sell_usd, buy_tx_hash, eth_spent, token_amount, price_usd, strategy_id, execution_kind, status, error, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(watcher_id, sell_tx_hash ?? null, sell_usd ?? null, buy_tx_hash ?? null, eth_spent ?? null, token_amount ?? null, price_usd ?? null, strategy_id, execution_kind, status, error, uid);
 }
 
-export function getDipTrades(watcherId = null, limit = 50) {
+export function getDipTrades(watcherId = null, limit = 50, userId = null) {
   if (watcherId) {
     return db.prepare(`
       SELECT t.*, w.chain FROM dip_trades t
@@ -358,8 +400,9 @@ export function getDipTrades(watcherId = null, limit = 50) {
   return db.prepare(`
     SELECT t.*, w.symbol, w.contract_address, w.chain FROM dip_trades t
     JOIN dip_watchers w ON w.id = t.watcher_id
+    ${userId ? "WHERE t.user_id = ?" : ""}
     ORDER BY t.created_at DESC LIMIT ?
-  `).all(limit);
+  `).all(...(userId ? [userId] : []), limit);
 }
 
 // ── Zooch reviews ────────────────────────────────────────────────────────────

@@ -62,7 +62,7 @@ import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wa
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
 import { COPILOT_BADGE, COPILOT_JS } from "./copilot-ui.js";
 import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
-import { handleAuth } from "./auth.mjs";
+import { handleAuth, sessionAddress } from "./auth.mjs";
 import { walletApiHandler } from "./wallet-api.mjs";
 import { activateSmartWallet, moveFunds } from "./smart-wallet-api.mjs";
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
@@ -186,6 +186,23 @@ function shell(title, body, active = "") {
 
 const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
+/**
+ * Ownership guard for mutation routes (Phase 2 isolation): returns an error
+ * string when the session user doesn't own the watcher, else null.
+ * Rows with NULL user_id (pre-isolation) are owned by everyone-as-admin —
+ * they were backfilled to the first user at startup, so treat NULL as
+ * admin-only.
+ */
+function watcherOwnershipError(req, watcherId) {
+  const uid = sessionAddress(req);
+  const w = getDipWatcher(watcherId);
+  if (!w) return "token not found";
+  if (w.user_id && uid && w.user_id !== uid) return "not your token";
+  // Rows with NULL user_id are pre-isolation legacy — owned by the first
+  // (admin) user once backfilled; until the Users panel exists, allow.
+  return null;
+}
+
 // ── Pages ─────────────────────────────────────────────────────────────────────
 
 async function isSignerConfigured() {
@@ -230,8 +247,8 @@ function computeWalletSummary(watchers) {
   return { tokensUsd, unrealizedPlUsd, realizedPlUsd, positionErrors, gas };
 }
 
-async function watchersPage(error = "", planWatcherId = null) {
-  const watchers = getDipWatchers();
+async function watchersPage(error = "", planWatcherId = null, userId = null) {
+  const watchers = getDipWatchers(userId);
   const signerConfigured = await isSignerConfigured();
   const summary = signerConfigured ? computeWalletSummary(watchers) : null;
   // When ?plan=<watcherId> is present (sniper → Accumulate migration), render a
@@ -796,8 +813,8 @@ async function overviewPageInner() {
   `, "overview");
 }
 
-function tradesPage() {
-  const trades = getDipTrades(null, 100);
+function tradesPage(userId = null) {
+  const trades = getDipTrades(null, 100, userId);
   // Gas is OUR spend: dip rows' sell_tx_hash is the EXTERNAL whale sell that
   // triggered the dip, not a tx we sent — only exits send a sell tx. Counting
   // trigger txs displayed a whale's $10 gas on our IMD row (2026-09-13).
@@ -855,9 +872,10 @@ function tradesPage() {
 }
 
 /** Token detail page: plan, market snapshot, technicals, impact, trades. */
-async function tokenDetailPage(watcherId) {
+async function tokenDetailPage(watcherId, userId = null) {
   const w = getDipWatcher(watcherId);
   if (!w) return null;
+  if (userId && w.user_id && w.user_id !== userId) return null; // isolation: another user's token
   const strategy = getAccumulationStrategy(w.id);
   const trades = getDipTrades(w.id, 15);
   const signerConfigured = await isSignerConfigured();
@@ -1741,9 +1759,9 @@ const server = createServer(async (req, res) => {
 
     if (url === "/" || url === "") return redirect("/overview");
     if (url === "/overview" && method === "GET") return send(await overviewPage());
-    if (url === "/tokens" && method === "GET") return send(await watchersPage(undefined, requestUrl.searchParams.get("plan")));
+    if (url === "/tokens" && method === "GET") return send(await watchersPage(undefined, requestUrl.searchParams.get("plan"), sessionAddress(req)));
     if (url.startsWith("/tokens/") && method === "GET") {
-      const page = await tokenDetailPage(decodeURIComponent(url.split("/")[2]));
+      const page = await tokenDetailPage(decodeURIComponent(url.split("/")[2]), sessionAddress(req));
       return page ? send(page) : redirect("/tokens");
     }
     if (url === "/alpha" && method === "GET") return send(await alphaPage(requestUrl.searchParams.get("src"), requestUrl.searchParams.get("vol")));
@@ -1776,7 +1794,7 @@ const server = createServer(async (req, res) => {
     }
     if (await handleMmRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain })) return;
     if (await handleVerifyRequest(url, method, { readBody, json, send, shell, esc })) return;
-    if (url === "/trades" && method === "GET") return send(tradesPage());
+    if (url === "/trades" && method === "GET") return send(tradesPage(sessionAddress(req)));
     if (url === "/settings" && method === "GET") return send(await settingsPage());
 
     // ── Co-pilot mode: SSE stream + approval endpoints ─────────────────────
@@ -1920,6 +1938,7 @@ const server = createServer(async (req, res) => {
           id, chain: chainKey, contractAddress, symbol, decimals,
           thresholdUsd: 0, buyAmountUsd: 0, slippagePct: 3, cooldownMinutes: 15,
           poolAddress: poolAddress || null,
+          userId: sessionAddress(req),
         });
         setDipWatcherActive(id, 0);
         // Scan the wallet for any existing balance/cost basis in this token — don't
@@ -1932,6 +1951,8 @@ const server = createServer(async (req, res) => {
     if (url.startsWith("/api/watchers/") && url.endsWith("/strategy") && method === "POST") {
       try {
         const watcherId = decodeURIComponent(url.split("/")[3]);
+        const ownershipError = watcherOwnershipError(req, watcherId);
+        if (ownershipError) return json({ ok: false, error: ownershipError }, 403);
         const watcher = getDipWatcher(watcherId);
         if (!watcher) return json({ ok: false, error: "token not found" });
         const body = JSON.parse(await readBody());
@@ -2066,6 +2087,8 @@ const server = createServer(async (req, res) => {
     }
     if (url.startsWith("/api/watchers/") && url.endsWith("/toggle") && method === "POST") {
       const id = decodeURIComponent(url.split("/")[3]);
+      const ownershipError = watcherOwnershipError(req, id);
+      if (ownershipError) return json({ ok: false, error: ownershipError }, 403);
       try {
         const { active } = JSON.parse(await readBody());
         // Guard: a dormant token has no plan and zeroed dip settings — arming
@@ -2082,6 +2105,8 @@ const server = createServer(async (req, res) => {
     // (scheduled buys fire on cadence via the daemon; this is the on-demand path).
     if (url.startsWith("/api/watchers/") && url.endsWith("/buy-now") && method === "POST") {
       const id = decodeURIComponent(url.split("/")[3]);
+      const ownershipError = watcherOwnershipError(req, id);
+      if (ownershipError) return json({ ok: false, error: ownershipError }, 403);
       const watcher = getDipWatcher(id);
       if (!watcher) return json({ ok: false, error: "token not found" });
       const strategy = getAccumulationStrategy(id);
@@ -2139,6 +2164,8 @@ const server = createServer(async (req, res) => {
     if (url.startsWith("/api/watchers/") && method === "PATCH") {
       try {
         const id = decodeURIComponent(url.replace("/api/watchers/", ""));
+        const ownershipError = watcherOwnershipError(req, id);
+        if (ownershipError) return json({ ok: false, error: ownershipError }, 403);
         const watcher = getDipWatcher(id);
         if (!watcher) return json({ ok: false, error: "token not found" });
         const strategy = getAccumulationStrategy(id);
@@ -2165,6 +2192,8 @@ const server = createServer(async (req, res) => {
 
     if (url.startsWith("/api/watchers/") && method === "DELETE") {
       const id = decodeURIComponent(url.replace("/api/watchers/", ""));
+      const ownershipError = watcherOwnershipError(req, id);
+      if (ownershipError) return json({ ok: false, error: ownershipError }, 403);
       removeDipWatcher(id);
       return json({ ok: true });
     }
