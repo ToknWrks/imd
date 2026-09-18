@@ -70,10 +70,15 @@ export function AUTH_LOGIN_PAGE(projectId, rpcUrl) {
     try {
       btn.disabled = true;
       // Open the AppKit universal modal — user picks ANY wallet.
-      await modal.open();
+      modal.open();
 
-      // Wait for connection (AppKit state) — resolves when a wallet connects.
+      // Wait for connection. Check the CURRENT state FIRST (a wallet may
+      // already be connected from a previous session — subscribeState only
+      // fires on CHANGE, so a pre-connected wallet would hang the wait).
+      const getAddress = () => modal.getAddress?.() || modal.getState?.()?.address;
       const address = await new Promise((resolve, reject) => {
+        const immediate = getAddress();
+        if (immediate) { resolve(immediate); return; }
         const timeout = setTimeout(() => reject(new Error('No wallet connected within 120s — try again')), 120000);
         const unsub = modal.subscribeState((state) => {
           if (state.address) { unsub(); clearTimeout(timeout); resolve(state.address); }
