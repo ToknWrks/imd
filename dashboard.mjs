@@ -61,6 +61,7 @@ import { getTokenMeta, resolvePoolOverride, buyToken } from "./dip-swap.mjs";
 import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wallet-slideout.js";
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
 import { COPILOT_BADGE, COPILOT_JS } from "./copilot-ui.js";
+import { APPKIT_SCRIPT } from "./wallet-appkit.js";
 import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
 import { handleAuth, sessionAddress } from "./auth.mjs";
 import { walletApiHandler } from "./wallet-api.mjs";
@@ -146,6 +147,9 @@ a { color:#e8b661; }
 `;
 
 function shell(title, body, active = "") {
+  // Phase 2: AppKit universal wallet modal on every page (header Connect).
+  const wcProjectId = process.env.WALLET_CONNECT_PROJECT_ID?.trim() || getEnvValue("WALLET_CONNECT_PROJECT_ID");
+  const appKitScript = wcProjectId ? APPKIT_SCRIPT(wcProjectId, getChain("ethereum").httpRpc()) : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -181,6 +185,7 @@ function shell(title, body, active = "") {
   <div id="cpModalBackdrop" style="display:none"><div id="cpModal"></div></div>
   <script>${WALLET_CONNECT_JS}<\/script>
   <script>${COPILOT_JS}<\/script>
+  ${appKitScript}
 </body>
 </html>`;
 }
@@ -1735,7 +1740,7 @@ const server = createServer(async (req, res) => {
     // SIWE-style: connect + sign a one-time nonce; HMAC cookie session.
     // Handles /api/auth/* itself; serves the login page or 401s APIs when
     // unauthenticated. Returns false to proceed with normal routing.
-    if (handleAuth(req, res, { url, method, readBody, json, send })) return;
+    if (await handleAuth(req, res, { url, method, readBody, json, send })) return;
 
     if (url === "/" || url === "") return redirect("/overview");
     if (url === "/overview" && method === "GET") return send(await overviewPage());

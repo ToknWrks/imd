@@ -17,6 +17,8 @@
     "@aa-sdk/core": "^4.88.5",
     "@account-kit/infra": "^4.88.5",
     "@account-kit/smart-contracts": "^4.88.5",
+    "@reown/appkit": "^1.8.24",
+    "@reown/appkit-adapter-ethers": "^1.8.24",
     "@vultisig/sdk": "^2.2.1",
     "better-sqlite3": "^11.0.0",
     "viem": "^2.47.10"

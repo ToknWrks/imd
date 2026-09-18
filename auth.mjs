@@ -267,7 +267,7 @@ export { LOGIN_PAGE_HTML };
  * was fully handled (login page / 401 JSON / auth endpoint) and the caller
  * must `return;`. Returns false to proceed with normal routing.
  */
-export function handleAuth(req, res, { url, method, readBody, json, send }) {
+export async function handleAuth(req, res, { url, method, readBody, json, send }) {
   // Auth endpoints are always reachable (login chicken-and-egg).
   if (url === "/api/auth/nonce" && method === "GET") {
     const nonce = issueNonce();
@@ -301,6 +301,16 @@ export function handleAuth(req, res, { url, method, readBody, json, send }) {
   // Unauthenticated: API/SSE get 401 JSON; pages get the login page.
   if (url.startsWith("/api/")) {
     json({ ok: false, error: "authentication required" }, 401);
+    return true;
+  }
+  // AppKit login page (Phase 2 hosted): full wallet modal when a Reown project
+  // id is configured; the simple injected-only page is the fallback.
+  const wcProjectId = envValue("WALLET_CONNECT_PROJECT_ID");
+  if (wcProjectId) {
+    const { AUTH_LOGIN_PAGE } = await import("./auth-appkit.js");
+    const { getChain } = await import("./chains.mjs");
+    const rpcUrl = getChain("ethereum").httpRpc();
+    send(AUTH_LOGIN_PAGE(wcProjectId, rpcUrl));
     return true;
   }
   send(LOGIN_PAGE_HTML);

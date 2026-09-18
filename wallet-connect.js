@@ -40,6 +40,22 @@ function _wcBtnLabel() {
 
 async function wcToggleConnect() {
   if (_wcAddress) return wcDisconnect();
+  // Phase 2: prefer the Reown AppKit universal modal (any wallet — injected,
+  // WalletConnect QR, 300+) when the platform script has initialized it.
+  if (window.appKitConnect) {
+    try {
+      var res = await window.appKitConnect();
+      if (!res || !res.address) return;
+      _wcAddress = res.address;
+      _wcBtnLabel();
+      await fetch('/api/wallet-connect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ address: _wcAddress }) });
+      openWallet();
+      return;
+    } catch (e) {
+      if (e && e.code === 4001) return;
+      // fall through to injected-only below
+    }
+  }
   if (!window.ethereum) { alert('No browser wallet found. Install MetaMask, Rabby, or another EIP-1193 wallet.'); return; }
   try {
     var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
