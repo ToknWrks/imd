@@ -1,103 +1,117 @@
-# Hosted Accumulate — Plan (reference)
+# Hosted Accumulate — Plan (updated 2026-09-18)
 
-Date: 2026-09-09. No code changed yet — this is the agreed plan for moving the
-local-only dip-trading app to a hosted (Hetzner VPS) deployment, vault-only.
+Supersedes the 2026-09-09 vault-only plan. Reflects the wallet-connect +
+smart-account migration (2026-09-17) and the co-pilot build (2026-09-18).
 
-## Decision summary
+## Decision summary (current)
 
-- **Hosting target**: Hetzner VPS, PM2 (dashboard + dip-watcher) behind Caddy TLS.
-- **Wallet model: VultiSig Fast Vault only.** No smart accounts / Alchemy
-  Account Kit in v1. No raw private keys on the server at all — delete the
-  `AGENT_PRIVATE_KEY` path from `signer.mjs` when hosted.
-- **Why vault-only works**: the VultiSig path is already proven end-to-end
-  locally — `vault.mjs` (create → email OTP → device share → export),
-  `signer.mjs` resolves it when `VAULT_ACTIVE=true`, and `buyDip()` in
-  `dip-swap.mjs` already executes every swap through `signer.callContract()`,
-  so no trading-code changes are needed for the vault itself.
-- **Reference app**: `github.com/ToknWrks/robinhood-lp` (Range Desk) — already
-  has Better Auth + Postgres/PGLite + wagmi/Reown wallet connect + a signed
-  `session-policy.ts` spend-grant model (max USD / daily cap / expiry, enforced
-  in paper mode only today). Reuse its auth + DB patterns; its browser-wallet
-  model can't do unattended trading, which is why accumulate keeps the vault.
+- **Hosting target**: unchanged — Hetzner VPS, PM2 behind Caddy TLS (or SSH
+  tunnel for single-user).
+- **Wallet model: CHANGED.** VultiSig vault-only is obsolete. The interactive
+  signer path is now **Connect wallet → browser-signed funding →
+  MultiOwnerLightAccount smart wallet (session key)** — see
+  `docs/smart-account-signer.md` and `CLAUDE.md` § Wallet-Connect. The legacy
+  VultiSig/raw-key paths remain for headless setups but are deprecated in the
+  UI.
+- **NEW: Co-pilot mode (built 2026-09-18, `copilot.mjs`/`copilot-ui.js`).**
+  Global Settings toggle (`COPILOT_ACTIVE`): every trade (dip, sniper, MM)
+  enqueues a sign request; the dashboard pops an approval modal; the user's
+  browser wallet signs via EIP-1193; timeout/decline = skipped and logged,
+  never traded without explicit approval. **The server holds no key material
+  in this mode** — the strongest possible custody posture for a hosted app.
+  Default off; autonomy (session key) remains the default signer.
+- **Reference app**: `github.com/ToknWrks/robinhood-lp` (Range Desk) for auth +
+  DB patterns still applies.
 
-## What has to change
+## What is DONE (since the original plan)
 
-1. **Per-user vault storage (core).**
-   - New `wallets` table: `user_id, kind='vault', address, local_party_id,
-     encrypted_vult, encrypted_pass, created_at`.
-   - Encrypt `.vult` share + password with AES-256-GCM using a master key from
-     the VPS environment (never plaintext in the DB).
-   - Replace the single `VULT_FILE_PATH` / `VULTISIG_PASS` env vars; load per
-     user via `loadVault({ vultPath, password })` (write share to a per-user
-     temp/data path, 0700).
-2. **Fix the signer cache (landmine).** `_signerPromises` in `signer.mjs` is
-   keyed by `chainKey` only — multi-user would hand user A's vault to user B.
-   Key it `userId:chainKey`.
-3. **`resolveSigner(userId, chainKey)`.** All call sites thread the user id.
-   Remove the raw-key fallback entirely; vault is the only kind.
-4. **Auth + users.** Better Auth (pattern from robinhood-lp `src/lib/auth/`)
-   or, if stays personal/small, a single shared password gate. Every trade API
-   gated; HTTPS only.
-5. **Per-user config.** ALCHEMY_API_KEY, AI keys move from `.env` to encrypted
-   user rows; `dip_watchers` gains `user_id`; daemon loop iterates all users'
-   watchers with per-user error isolation + rate limiting.
-6. **Vault UX on Settings.** Per-user create (OTP email) or import existing
-   device share; keep the `Server-`-share rejection guard in `vault.mjs`.
-   Add: deposit card (address + QR), export-share button, "share stored
-   server-side" disclosure.
+- ✅ Smart-account signer (MultiOwnerLightAccount, session key, AA bundler) —
+  live, signs all trades in autonomy mode.
+- ✅ Browser-signed funding, smart-wallet activate, move in/out (100% sweeps
+  clamp to balance − exact gas cost).
+- ✅ Co-pilot mode end-to-end: SSE sign-request stream, approval modal with
+  decoded summary + countdown, header badge, Settings toggle, request ledger
+  (`copilot_requests`), skip-and-log timeout semantics, unit-tested lifecycle.
+- ✅ Connect-wallet header session (address-only persistence).
+- ✅ VPS runbook (`docs/vps-deploy.md`) — provision → pm2 → scoped control →
+  health checks; coexists with the trader app.
 
-## VPS deployment shape
+## Phase 1 — host it for yourself (the near path)
 
-- PM2 `ecosystem.config.cjs` as today (dashboard + dip-watcher) + Caddy for
-  auto-HTTPS.
-- Hardening: SSH keys only (`id_hetzner` exists), ufw 22/443, unattended-upgrades.
-- SQLite stays (single box, single writer) + **Litestream** streaming backups
-  to object storage or Hetzner volume snapshots (trade history = money records).
-- Secrets: `.env` app-user-readable only; app data under `/var/lib/accumulate/`, 0700.
-- Smallest CX instance suffices; CPX21 for headroom.
+Everything needed to run the CURRENT single-user app on a VPS safely:
 
-## Operational gaps hosting makes mandatory
+1. **Auth gate on the dashboard** — today there is NONE; anyone reaching the
+   port can add tokens, change plans, read positions, resolve/decline co-pilot
+   requests, and hit trade APIs. Minimum: password gate + session cookie on
+   every route including `/api/copilot/*` (SSE included — request summaries
+   leak trade intent). HTTPS (Caddy) or SSH-tunnel-only binding.
+2. **WS reconnect + watchdog** (`dip-watcher.mjs`, known TODO) — a dropped
+   Swap-event subscription silently kills dip detection. Resubscribe-on-drop;
+   alert/watchdog when dead > N minutes. Scheduled buys self-heal; dips don't.
+3. **Alerting** — trade failures, low gas balance, dead subscription,
+   signing failures currently only log/ledger. Telegram or email push.
+4. **Litestream** (or volume snapshots) — `data/accumulate.db` is now the
+   money record; single-file loss = history gone.
+5. Standard hardening per `docs/vps-deploy.md` §0/§5: SSH-keys-only, ufw,
+   secrets off-box where practical, fund-only-the-budget discipline.
 
-- **WS reconnect + watchdog** (known TODO in CLAUDE.md): dead Swap-event
-  subscription = silent no dip detection. Resubscribe-on-drop; alert if dead
-  > N minutes.
-- **Trade-failure alerting**: `dip_trades` errors currently only log — notify
-  the user (Telegram/email). Also low-gas-wallet alerts.
-- **VultiServer reachability healthcheck**: every buy is an MPC co-sign with
-  VultiServer; alert on repeated fast-signing failures.
+Phase 1 signers: autonomy (session key, server-side) for unattended trading,
+or co-pilot for approve-everything. Both are built. Co-pilot over an SSH
+tunnel is the safest personal-hosted configuration (zero server-side keys).
 
-## VultiSig caveats (accepted, not blockers)
+## Phase 2 — other users (the real work)
 
-1. **Custody posture**: the VPS holds each user's device share + password;
-   Fast Vault is 2-of-2 (device + VultiServer), so app + VultiServer can move
-   funds. For yourself = hot wallet on your own server (same trust as today's
-   env key). For others = de facto custodial → mitigations: export button so
-   users can leave with their share, explicit disclosure, and/or restrict to
-   "import your own vault, keep your own backup" (hot-standby signer model).
-2. **Chains**: ethereum + base only (`VAULT_CHAIN_NAMES`); VultiSig's `Chain`
-   enum has no Robinhood 4663 → hosted version drops 4663 auto-trading.
-3. **Password recovery**: decide per import whether the app stores the vault
-   password (encrypted) or the user keeps sole custody (must remember it).
-4. **OTP flow**: create→verify is in-memory (`_pending`, MemoryStorage);
-   dashboard restart mid-signup = retry. Session table later, not day one.
+Multi-tenancy does not exist. These are the gaps, roughly in build order:
 
-## Bigger-picture option (later, not v1)
+1. **Auth + users first** (Better Auth pattern from robinhood-lp).
+2. **`user_id` everywhere** — `dip_watchers`, `dip_trades`,
+   `accumulation_strategies`, `sniper_*`, `mm_*`, `copilot_requests`, gas
+   ledger. Every engine loop and route threads the user id.
+3. **Per-user config** — ALCHEMY_API_KEY (and optional AI/indexer keys) move
+   from `.env` to encrypted per-user rows; daemon iterates all users' watchers
+   with per-user error isolation + rate limits (Alchemy free-tier caps shared
+   10-blocks-per-getLogs across users).
+4. **Signer cache fix** — `_signerPromises` is keyed `chainKey` only; multi-user
+   hands user A's signer to user B. Key it `userId:chainKey`. Same for the
+   co-pilot signer cache and the connected-wallet registry (one
+   `CONNECTED_WALLET` today).
+5. **Per-user smart accounts or per-user co-pilot.** Two viable postures:
+   - **Co-pilot by default (recommended):** each user connects their own
+     browser wallet; the server proposes, the user signs; non-custodial by
+     construction. SSE + resolve/decline must be per-user isolated + authed.
+     No server-side key material at all.
+   - **Session key per user:** user creates a session key in Settings, server
+     signs UOs for their account. Autonomy for unattended dips, but the server
+     then holds each user's session key — Phase 2 on-chain spend caps
+     (`docs/smart-account-signer.md`) become the custody mitigation.
+6. **Per-strategy engine loop** — one daemon iterating all users' active
+   watchers/strategies with isolation; or one pm2 process per user (simpler,
+   fine at small scale).
+7. **Dashboard multi-user** — co-pilot badge/modal per user session; request
+   queue filtered by user; per-user trade/position views.
+8. **Ops before inviting others:** per-user failure alerting, spend/failure
+   dashboards, ToS/custody disclosure (trivial under co-pilot: "the server
+   never holds your keys; you approve and sign every trade in your browser"),
+   Litestream multi-tenant sizing, pricing decision.
 
-Alchemy Account Kit smart accounts with **session keys** as a third wallet
-kind: user approves one session key whitelisted to router `execute` selectors
-with an ETH cap ≈ plan budget and expiry ≈ `end_at` — non-custodial unattended
-trading, bounds a server compromise. Port robinhood-lp's `SessionPolicy`
-fields into the grant. Do this after v1 proves out; it's the cleanest answer
-for hosting other people's money (and the legal posture).
+## Custody posture (decision, superseding the vault discussion)
 
-## Phased implementation
+The original plan's custody problem (server holds device share + password =
+de facto custodial) **dissolves under co-pilot**: the hosted server's role is
+proposal + bookkeeping only; signatures happen in the user's browser wallet.
+Session-key autonomy remains available for users who want unattended dips,
+bounded by funding discipline now and on-chain spend caps later.
 
-1. **Day 1–2**: VPS provision (Caddy + PM2 + Litestream), auth gate, `wallets`
-   table, per-user encrypted vault storage, signer cache fix,
-   `resolveSigner(userId, chainKey)`.
-2. **Day 3**: multi-user daemon loop, Settings writes per-user vaults, export
-   button, deposit/funding card.
-3. **Day 4**: WS reconnect watchdog + alerts (trade failure, low gas, dead
-   subscription, signing failures).
-4. **Before inviting others**: custody disclosure/export UX; decide custodial
-   vs bring-your-own-vault posture.
+## Operational gaps that hosting makes mandatory (unchanged in kind)
+
+- WS reconnect + watchdog (Phase 1 item 2)
+- Trade-failure / low-gas / dead-subscription alerts (Phase 1 item 3)
+- Signing-failure circuit breaker (port from trader codebase if errors appear)
+
+## Non-goals for hosted v1
+
+- Robinhood Chain (4663) auto-trading (WS + signer gaps; the MM tab is already
+  mainnet-only and hidden).
+- Per-user VultiSig vaults — superseded by co-pilot / session keys.
+- In-browser key custody beyond co-pilot signing (no WalletConnect signing
+  relays; the user's own extension is the signer).

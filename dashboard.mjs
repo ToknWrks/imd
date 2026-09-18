@@ -60,6 +60,8 @@ import { formatUnits } from "viem";
 import { getTokenMeta, resolvePoolOverride, buyToken } from "./dip-swap.mjs";
 import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wallet-slideout.js";
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
+import { COPILOT_BADGE, COPILOT_JS } from "./copilot-ui.js";
+import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
 import { walletApiHandler } from "./wallet-api.mjs";
 import { activateSmartWallet, moveFunds } from "./smart-wallet-api.mjs";
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
@@ -168,12 +170,15 @@ function shell(title, body, active = "") {
       <a class="nav-link ${active === "trades" ? "active" : ""}" href="/trades">Trades</a>
       <a class="nav-link ${active === "settings" ? "active" : ""}" href="/settings">Settings</a>
       ${WALLET_CONNECT_BUTTON}
+      ${COPILOT_BADGE}
       ${WALLET_NAV_BUTTON}
     </div>
   </header>
   <main>${body}</main>
   ${walletSlideoutHtml()}
+  <div id="cpModalBackdrop" style="display:none"><div id="cpModal"></div></div>
   <script>${WALLET_CONNECT_JS}<\/script>
+  <script>${COPILOT_JS}<\/script>
 </body>
 </html>`;
 }
@@ -976,6 +981,8 @@ async function settingsPage(vaultMsg = "") {
   }
   // Smart-account mode state: session key presence + derived SCW address.
   const smartActive = getEnvValue("SMART_ACCOUNT_ACTIVE") === "true";
+  const copilotOn = isCopilotActive();
+  const copilotConnected = getEnvValue("CONNECTED_WALLET");
   const aaSessionKey = getEnvValue("AA_SESSION_KEY");
   let smartAddress = "";
   let smartModeNote = "";
@@ -1004,7 +1011,7 @@ async function settingsPage(vaultMsg = "") {
         </select>
       </div>
       <div id="smartFields" style="${smartActive ? "" : "display:none"}">
-        <p class="hint">Signs via an Alchemy Modular Account using a burner session key held on this machine. Phase 1: the session key IS the account owner — cap exposure by funding only the plan budget + gas. Phase 2 (on-chain spend caps via SessionKeyPlugin) tracked in docs/smart-account-signer.md.</p>
+         <p class="hint">Signs via an Alchemy Modular Account using a burner session key held on this machine. Phase 1: the session key IS the account owner — cap exposure by funding only the plan budget + gas. Phase 2 (on-chain spend caps via SessionKeyPlugin) tracked in docs/smart-account-signer.md.</p>
         ${smartAddress
           ? `<p>✓ Smart account derived — <code>${smartAddress}</code> <span class="hint">(fund THIS address from the wallet slideout; first UserOperation deploys it)</span></p>`
           : `<p class="hint">No smart account yet — generate a session key below (or paste an existing one).</p>`}
@@ -1052,6 +1059,20 @@ async function settingsPage(vaultMsg = "") {
         <button class="secondary" onclick="importVault()">Import &amp; activate</button>
         </div>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Trading mode</h2>
+      <p class="hint"><b>Autonomy</b> — the configured signer (smart wallet / legacy) trades automatically. <b>Co-pilot</b> — every trade (dip, sniper, and MM) waits for your approval: the dashboard pops an approval modal, your connected browser wallet signs it, and anything you don't approve in time is <b>skipped and logged</b> — never traded without explicit approval.</p>
+      <div class="field"><label>Mode</label>
+        <select id="copilotMode">
+          <option value="off" ${!copilotOn ? "selected" : ""}>Autonomy — trade automatically (session key)</option>
+          <option value="on" ${copilotOn ? "selected" : ""}>Co-pilot — approve every trade in the browser</option>
+        </select>
+      </div>
+      ${copilotOn && !copilotConnected ? `<p class="hint" style="color:#f87171">⚠ Co-pilot is ON but no wallet is connected — trades will fail until you click <b>Connect wallet</b> in the header.</p>` : ""}
+      ${copilotOn ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Timeout: <code>COPILOT_TIMEOUT_S</code> (default 90s).</p>` : ""}
+      <button onclick="saveCopilotMode(this)">Save trading mode</button>
     </div>
 
     <div class="card">
@@ -1176,6 +1197,19 @@ async function settingsPage(vaultMsg = "") {
         if (model) updates.OPENAI_MODEL = model;
         await fetch('/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(updates) });
         location.reload();
+      }
+      async function saveCopilotMode() {
+        const sel = document.getElementById('copilotMode');
+        const active = sel.value === 'on';
+        if (active && !window.ethereum) { alert('Co-pilot needs a browser wallet (MetaMask/Rabby) installed before you can enable it.'); return; }
+        const btns = document.querySelectorAll('#copilotMode ~ button, button[onclick^="saveCopilotMode"]');
+        btns.forEach(function(b){ b.disabled = true; });
+        try {
+          const r = await fetch('/api/copilot/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ active }) });
+          const j = await r.json();
+          if (!j.ok) { alert(j.error); return; }
+          location.reload();
+        } catch (e) { alert(e.message); }
       }
       async function saveIndexerKeys() {
         const uni = document.getElementById('uniswapApiKey').value.trim();
@@ -1737,6 +1771,60 @@ const server = createServer(async (req, res) => {
     if (await handleVerifyRequest(url, method, { readBody, json, send, shell, esc })) return;
     if (url === "/trades" && method === "GET") return send(tradesPage());
     if (url === "/settings" && method === "GET") return send(await settingsPage());
+
+    // ── Co-pilot mode: SSE stream + approval endpoints ─────────────────────
+    if (url === "/api/copilot/stream" && method === "GET") {
+      const remove = addSseClient(res);
+      req.on("close", remove);
+      return; // SSE — response stays open; do NOT fall through to other handlers
+    }
+    if (url === "/api/copilot/pending" && method === "GET") {
+      return json({ ok: true, active: isCopilotActive(), count: pendingCount(), requests: listPending() });
+    }
+    if (url === "/api/copilot/history" && method === "GET") {
+      return json({ ok: true, requests: listRecent(30) });
+    }
+    if (url === "/api/copilot/resolve" && method === "POST") {
+      try {
+        const { id, txHash } = JSON.parse(await readBody());
+        if (!id || !txHash) return json({ ok: false, error: "id and txHash required" });
+        const r = resolveRequest(id, txHash);
+        return json(r.ok ? r : { ...r }, r.ok ? 200 : 409);
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    if (url === "/api/copilot/decline" && method === "POST") {
+      try {
+        const { id, reason } = JSON.parse(await readBody());
+        if (!id) return json({ ok: false, error: "id required" });
+        const r = declineRequest(id, reason || "declined by user in browser");
+        return json(r, r.ok ? 200 : 409);
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    // Toggle: POST /api/copilot/mode { active: true|false }
+    if (url === "/api/copilot/mode" && method === "POST") {
+      try {
+        const { active } = JSON.parse(await readBody());
+        if (typeof active !== "boolean") return json({ ok: false, error: "active (boolean) required" });
+        if (active) {
+          const connected = getEnvValue("CONNECTED_WALLET");
+          if (!connected) return json({ ok: false, error: "Connect a wallet in the header first — co-pilot signs with the browser wallet" });
+        }
+        writeEnvValues({ COPILOT_ACTIVE: active ? "true" : "false" });
+        if (!active) {
+          // Leaving co-pilot: expire any pending requests so blocked engines resume as skipped.
+          for (const r of listPending()) declineRequest(r.id, "co-pilot mode switched off");
+        }
+        const { invalidateSigner } = await import("./signer.mjs");
+        invalidateSigner();
+        console.log(`[copilot] mode ${active ? "ENABLED — all trades now require browser approval" : "disabled"}`);
+        return json({ ok: true, active });
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    if (url === "/api/copilot/requests" && method === "GET") {
+      // Admin/debug view incl. resolved rows
+      const limit = Math.min(200, Number(requestUrl.searchParams.get("limit") ?? 30) || 30);
+      return json({ ok: true, requests: listRecent(limit) });
+    }
 
     if (url === "/settings" && method === "POST") {
       try { writeEnvValues(JSON.parse(await readBody())); return json({ ok: true }); }

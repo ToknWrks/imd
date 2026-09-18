@@ -75,10 +75,22 @@ export async function resolveSigner(chainKey = "ethereum") {
  */
 export function invalidateSigner(chainKey = "ethereum") {
   _signerPromises.delete(chainKey);
+  // Co-pilot signers cache the connected address — drop them on any invalidation
+  // (mode toggle, CONNECTED_WALLET change) so the next resolve picks up state.
+  import("./copilot.mjs").then((m) => m.invalidateCoPilotSigners()).catch(() => {});
 }
 
 async function _resolveSigner(chainKey = "ethereum") {
   const dep = getChain(chainKey);
+
+  if (process.env.COPILOT_ACTIVE === "true") {
+    // Co-pilot mode: the browser wallet signs every trade after an in-dashboard
+    // approval prompt. callContract() enqueues a sign request and blocks — a
+    // decline/timeout throws, which every engine's catch already handles
+    // (reservation finalized, error row written, trade skipped).
+    const { buildCoPilotSigner } = await import("./copilot.mjs");
+    return buildCoPilotSigner(chainKey);
+  }
 
   if (process.env.SMART_ACCOUNT_ACTIVE === "true") {
     // Alchemy Modular Account v2 via a VPS-held session key. callContract()
