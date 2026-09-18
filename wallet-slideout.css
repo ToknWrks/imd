@@ -1,0 +1,66 @@
+/* wallet-slideout.css — wallet modal (centered) + accordion + nav button styles.
+   Terminal theme: graphite field, amber accent, sharp corners, mono numerals. */
+
+.wallet-overlay                      { position:fixed; inset:0; background:rgba(5,6,8,0.75); z-index:999; display:none; }
+.wallet-overlay.open                 { display:block; }
+/* Centered modal: 80% of viewport, both axes, left-to-right and top-to-bottom. */
+.wallet-slideout                     { position:fixed; top:10%; left:10%; width:80%; height:80%; background:#101318; border:1px solid rgba(255,255,255,0.09); border-radius:4px; z-index:1000; opacity:0; transition:opacity 0.2s ease; padding:1.25rem; overflow-y:auto; margin:0; }
+.wallet-overlay.open .wallet-slideout { opacity:1; }
+.wallet-slideout h3                  { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.12em; color:rgba(232,182,97,0.85); margin:0 0 0.75rem; display:flex; justify-content:space-between; align-items:center; }
+.wallet-accordion                    { border:1px solid rgba(255,255,255,0.09); border-radius:3px; margin-bottom:0.65rem; overflow:hidden; background:#0c0e11; }
+.wallet-accordion-header             { display:flex; align-items:center; gap:0.5rem; padding:0.7rem 0.75rem; cursor:pointer; user-select:none; background:#0c0e11; font-size:0.84rem; }
+.wallet-accordion-header:hover       { background:rgba(232,182,97,0.06); }
+.wallet-accordion-header .arrow      { transition:transform 0.15s; font-size:0.7rem; color:rgba(255,255,255,0.46); }
+.wallet-accordion.open .wallet-accordion-header .arrow { transform:rotate(90deg); }
+.wallet-accordion-body               { display:none; }
+.wallet-accordion.open .wallet-accordion-body { display:block; }
+.wallet-chain-row                    { display:flex; align-items:center; gap:0.55rem; padding:0.55rem 0.75rem 0.55rem 0.75rem; font-size:0.8rem; border-top:1px solid rgba(255,255,255,0.05); font-variant-numeric:tabular-nums; }
+.wallet-chain-row .chain-icon        { width:18px; height:18px; border-radius:2px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:0.58rem; font-weight:700; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-chain-row .amount            { margin-left:auto; font-size:0.82rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-chain-row .usd               { margin-left:0.35rem; color:rgba(255,255,255,0.55); font-size:0.74rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-total-row                    { display:flex; align-items:center; gap:0.5rem; padding:0.7rem 0.75rem; font-size:0.88rem; border:1px solid rgba(255,255,255,0.09); border-radius:3px; background:#0c0e11; font-variant-numeric:tabular-nums; }
+.wallet-total-row .amount            { margin-left:auto; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-token-icon                   { width:24px; height:24px; border-radius:2px; flex-shrink:0; font-size:0.7rem; display:flex; align-items:center; justify-content:center; font-weight:700; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-close                        { background:none; border:none; color:rgba(255,255,255,0.65); font-size:1.3rem; cursor:pointer; padding:0; line-height:1; }
+.wallet-close:hover                  { color:#e8b661; }
+/* Grand total shown inline in the modal header, next to the title. */
+.wallet-header-total                 { margin-left:0.75rem; color:#e8b661; font-size:0.95rem; letter-spacing:0.02em; font-variant-numeric:tabular-nums; }
+.wallet-loading                      { color:rgba(255,255,255,0.46); font-size:0.82rem; text-align:center; padding:1.5rem 0; }
+.wallet-nav-btn                      { background:transparent; border:1px solid rgba(255,255,255,0.15); color:rgba(255,255,255,0.72); cursor:pointer; font-size:0.9rem; padding:0.25rem 0.5rem; display:flex; align-items:center; gap:0.35rem; border-radius:3px; }
+.wallet-nav-btn:hover                { color:#e8b661; border-color:rgba(232,182,97,0.5); }
+.wallet-nav-btn .badge               { font-size:0.62rem; background:rgba(232,182,97,0.14); color:#e8b661; padding:0.1rem 0.4rem; border-radius:2px; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+
+/* ── Header wallet-connect button ── */
+.wallet-connect-btn                  { background:rgba(74,222,128,0.1); color:#4ade80; border:1px solid rgba(74,222,128,0.35); border-radius:4px; padding:0.35rem 0.75rem; font-size:0.78rem; cursor:pointer; font-family:ui-monospace,"SF Mono",Menlo,monospace; letter-spacing:0.03em; }
+.wallet-connect-btn:hover            { background:rgba(74,222,128,0.2); color:#4ade80; }
+.wallet-connect-btn.connected        { background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.85); border-color:rgba(255,255,255,0.15); }
+.wallet-connect-btn.connected:hover  { background:rgba(248,113,113,0.12); color:#f87171; border-color:rgba(248,113,113,0.4); }
+
+/* ── Smart-wallet transfer section (two cards: owner left / SCW right) ── */
+.sw-head                             { font-size:0.72rem; text-transform:uppercase; letter-spacing:0.12em; color:rgba(232,182,97,0.85); margin:0.9rem 0 0.55rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.sw-head .hint                       { text-transform:none; letter-spacing:0.02em; }
+.sw-grid                             { display:grid; grid-template-columns:1fr 1fr; gap:0.65rem; }
+@media (max-width:640px)             { .sw-grid { grid-template-columns:1fr; } }
+.sw-card                             { border:1px solid rgba(255,255,255,0.09); border-radius:3px; background:#0c0e11; padding:0.7rem 0.75rem; }
+.sw-card-title                       { font-size:0.78rem; font-weight:600; margin-bottom:0.25rem; display:flex; align-items:center; gap:0.4rem; }
+.sw-card-title .hint                 { font-weight:400; font-size:0.62rem; border:1px solid rgba(255,255,255,0.15); border-radius:2px; padding:0.05rem 0.3rem; }
+.sw-addr                             { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.68rem; color:rgba(255,255,255,0.45); margin-bottom:0.5rem; display:flex; align-items:center; gap:0.35rem; }
+.sw-addr > span                      { overflow:hidden; text-overflow:ellipsis; }
+.sw-copy                             { background:none; border:none; color:rgba(255,255,255,0.4); cursor:pointer; font-size:0.75rem; padding:0 0.15rem; line-height:1; flex-shrink:0; }
+.sw-copy:hover                       { color:#e8b661; }
+.sw-asset                            { display:flex; align-items:center; gap:0.45rem; font-size:0.78rem; padding:0.35rem 0; font-variant-numeric:tabular-nums; }
+.sw-asset .amount                    { margin-left:auto; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.sw-asset .usd                       { color:rgba(255,255,255,0.5); font-size:0.7rem; min-width:4.2rem; text-align:right; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.sw-token-icon                       { width:18px; height:18px; border-radius:2px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:0.6rem; font-weight:700; color:#fff; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.sw-move-row                         { display:flex; gap:0.35rem; margin:0.1rem 0 0.4rem; }
+.sw-move-row input                   { flex:1; min-width:0; background:#0d1015; color:#fff; border:1px solid rgba(255,255,255,0.18); border-radius:3px; padding:0.3rem 0.5rem; font-size:0.78rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; outline:none; }
+.sw-move-row input:focus             { border-color:rgba(232,182,97,0.5); }
+.sw-btn                              { background:rgba(232,182,97,0.14); color:#e8b661; border:1px solid rgba(232,182,97,0.4); border-radius:3px; padding:0.3rem 0.55rem; font-size:0.72rem; cursor:pointer; white-space:nowrap; }
+.sw-btn:hover                        { background:rgba(232,182,97,0.24); }
+.sw-btn.alt                          { background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.8); border-color:rgba(255,255,255,0.18); }
+.sw-btn.alt:hover                    { background:rgba(255,255,255,0.13); color:#fff; }
+.sw-btn.activate                     { width:100%; padding:0.45rem; font-size:0.78rem; }
+.sw-btn.ghost                        { background:rgba(255,255,255,0.05); color:rgba(255,255,255,0.55); border-color:rgba(255,255,255,0.12); font-size:0.66rem; }
+.sw-btn.ghost:hover                  { color:#e8b661; border-color:rgba(232,182,97,0.4); }
+.sw-btn:disabled                     { opacity:0.5; cursor:wait; }
+.sw-status                           { min-height:1.1rem; font-size:0.72rem; margin-top:0.3rem; word-break:break-all; }

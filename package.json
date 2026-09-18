@@ -1,0 +1,24 @@
+{
+  "name": "accumulate",
+  "version": "0.1.0",
+  "description": "Buy the dip, automatically. Watches any ERC-20 token on Ethereum mainnet for large sells and market-buys when a sell crosses your $ threshold. Your key never leaves your machine.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dashboard": "node dashboard.mjs",
+    "watch": "node dip-watcher.mjs",
+    "start": "./imd.sh start",
+    "stop": "./imd.sh stop",
+    "logs": "./imd.sh logs",
+    "restart": "./imd.sh restart",
+    "status": "./imd.sh status"
+  },
+  "dependencies": {
+    "@aa-sdk/core": "^4.88.5",
+    "@account-kit/infra": "^4.88.5",
+    "@account-kit/smart-contracts": "^4.88.5",
+    "@vultisig/sdk": "^2.2.1",
+    "better-sqlite3": "^11.0.0",
+    "viem": "^2.47.10"
+  }
+}
