@@ -74,7 +74,16 @@ async function wcToggleConnect() {
 async function wcDisconnect() {
   _wcAddress = null;
   _wcBtnLabel();
-  await fetch('/api/wallet-connect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ address: null }) });
+  // FULL LOGOUT (2026-09-19): disconnecting the wallet must also end the
+  // server SESSION — the auth gate means no session = every page is the
+  // connect-wallet gate. The old code only cleared the address record and
+  // left the user "logged in" with nothing connected (the broken logout).
+  // Also clear AppKit's cached connection so the next login picks a fresh
+  // account instead of silently reusing the old one.
+  try { await fetch('/auth/logout', { method: 'POST' }); } catch {}
+  try { if (window.appKitModal?.disconnect) await window.appKitModal.disconnect(); } catch {}
+  try { localStorage.removeItem('@appkit/connection'); localStorage.removeItem('@w3m/connected'); localStorage.removeItem('wagmi.connected'); localStorage.removeItem('wagmi.wallet'); } catch {}
+  location.href = '/';
 }
 
 // Restore a prior connection on load (address only — never re-requests access).
