@@ -47,13 +47,16 @@ function wrapSignerGas(signer, maxGasGwei) {
   };
 }
 
-export async function handleSniperRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain, sessionAddress = null }) {
+export async function handleSniperRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain, sessionAddress = null, req = null }) {
   // Per-user read wallet (2026-09-18): balances belong to the session user —
   // their registry SCW / users-table key / connected wallet, never the global
   // env signer (which on hosted shows 0 for everyone).
   let readWallet = null;
   try {
-    const uid = sessionAddress?.(null);
+    // NOTE: sessionAddress needs the REQUEST to read the cookie — passing
+    // null made it throw, silently skipping per-user resolution and falling
+    // back to the global signer (balance 0 for everyone on /sniper).
+    const uid = sessionAddress ? sessionAddress(req) : null;
     if (uid) {
       const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
       readWallet = await resolveUserReadWallet(uid, "ethereum");
