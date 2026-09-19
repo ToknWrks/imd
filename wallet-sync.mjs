@@ -101,7 +101,7 @@ async function fetchTransfers({ chainKey, token, wallet, direction }) {
  * Reconcile external trades for one token into sniper_trades.
  * Returns { added, skipped } — added rows carry dex="EXT (wallet sync)".
  */
-export async function syncExternalTrades({ chainKey, tokenAddress, wallet }) {
+export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userId = null }) {
   const dep = getChain(chainKey);
   const token = String(tokenAddress).toLowerCase();
   const ethUsd = await getEthUsdPrice(chainKey).catch(() => null);
@@ -119,13 +119,13 @@ export async function syncExternalTrades({ chainKey, tokenAddress, wallet }) {
     byTx.get(t.hash).push(t);
   }
 
-  const known = new Set(getSniperTokenHistory(chainKey, token).map((t) => String(t.buy_tx_hash || "").toLowerCase()));
+  const known = new Set(getSniperTokenHistory(chainKey, token, userId).map((t) => String(t.buy_tx_hash || "").toLowerCase()));
   // Rows with NO price info (eth_spent AND eth_received NULL) are excluded
   // from getSniperTokenHistory's priced-only filter — track them separately
   // or a re-sync re-inserts them as priced duplicates (HASH buy 0xeedd4c58
   // existed as an unpriced row from the old sync bug; re-sync added it again
   // with cost, double-counting the position).
-  const knownUnpriced = new Set(getSniperTokenHistoryUnpriced(chainKey, token).map((t) => String(t.buy_tx_hash || "").toLowerCase()));
+  const knownUnpriced = new Set(getSniperTokenHistoryUnpriced(chainKey, token, userId).map((t) => String(t.buy_tx_hash || "").toLowerCase()));
   let added = 0, skipped = 0;
 
   for (const [tx, transfers] of byTx) {
@@ -242,6 +242,7 @@ export async function syncExternalTrades({ chainKey, tokenAddress, wallet }) {
       token_amount: tokenAmount,
       buy_tx_hash: tx,
       eth_received: isSell ? ethReceived : null,
+      user_id: userId,
     });
     added++;
   }

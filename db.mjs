@@ -162,6 +162,7 @@ ensureColumn("sniper_recent_tokens", "user_id", "user_id TEXT");
 ensureColumn("copilot_requests", "user_id", "user_id TEXT");
 ensureColumn("zooch_reviews", "user_id", "user_id TEXT");
 ensureColumn("gas_spend", "user_id", "user_id TEXT");
+ensureColumn("sniper_autosells", "user_id", "user_id TEXT");
 
 // One-time backfill: rows created before isolation get the admin/first user so
 // they don't vanish from the owner's view.
@@ -223,15 +224,17 @@ export function touchSniperToken({ chain, contract_address, symbol = null, activ
 }
 
 /** Recent tokens for a chain, active first, then most-recently used. */
-export function getSniperRecentTokens(chain, limit = 12) {
+export function getSniperRecentTokens(chain, limit = 12, userId = null) {
+  // Per-user (2026-09-19): remembered tokens + verification state are
+  // per-user. NULL-legacy rows remain visible to everyone (admin history).
   return db.prepare(`
     SELECT contract_address, symbol, last_used_at, use_count, is_active,
            verified_at, verified_via
     FROM sniper_recent_tokens
-    WHERE chain = ?
+    WHERE chain = ? ${userId ? "AND (user_id = ? OR user_id IS NULL)" : ""}
     ORDER BY is_active DESC, last_used_at DESC
     LIMIT ?
-  `).all(chain, limit);
+  `).all(...(userId ? [chain, userId, limit] : [chain, limit]));
 }
 
 /** The chain's active token (the bot's current target), or null. */
@@ -257,18 +260,19 @@ db.exec(`
     status           TEXT NOT NULL DEFAULT 'armed',  -- armed|triggering|triggered|error|cancelled
     sell_tx_hash     TEXT,
     error            TEXT,
+    user_id          TEXT,
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     triggered_at     TEXT
   );
 `);
 
 /** Arm auto-sell for a token (replaces any armed order for the same token). */
-export function armSniperAutoSell({ chain, contract_address, symbol, target_pct, cost_at_arm_eth }) {
+export function armSniperAutoSell({ chain, contract_address, symbol, target_pct, cost_at_arm_eth, user_id = null }) {
   db.prepare("UPDATE sniper_autosells SET status = 'cancelled' WHERE chain = ? AND contract_address = ? AND status = 'armed'").run(chain, String(contract_address).toLowerCase());
   const r = db.prepare(`
-    INSERT INTO sniper_autosells (chain, contract_address, symbol, target_pct, cost_at_arm_eth)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(chain, String(contract_address).toLowerCase(), symbol ?? null, target_pct, cost_at_arm_eth);
+    INSERT INTO sniper_autosells (chain, contract_address, symbol, target_pct, cost_at_arm_eth, user_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(chain, String(contract_address).toLowerCase(), symbol ?? null, target_pct, cost_at_arm_eth, user_id ?? null);
   return r.lastInsertRowid;
 }
 
@@ -302,9 +306,11 @@ export function getArmedSniperAutoSells(chain = null) {
     : db.prepare("SELECT * FROM sniper_autosells WHERE status = 'armed' ORDER BY id").all();
 }
 
-/** Recent auto-sell orders for the UI. */
-export function getSniperAutoSells(chain, limit = 10) {
-  return db.prepare("SELECT * FROM sniper_autosells WHERE chain = ? ORDER BY id DESC LIMIT ?").all(chain, limit);
+/** Recent auto-sell orders for the UI. Per-user (2026-09-19). */
+export function getSniperAutoSells(chain, limit = 10, userId = null) {
+  return db.prepare(
+    `SELECT * FROM sniper_autosells WHERE chain = ? ${userId ? "AND (user_id = ? OR user_id IS NULL)" : ""} ORDER BY id DESC LIMIT ?`
+  ).all(...(userId ? [chain, userId, limit] : [chain, limit]));
 }
 
 // ── Watchers ──────────────────────────────────────────────────────────────────
@@ -583,11 +589,14 @@ export function finalizeStrategyExecution({ executionId, txHash = null, error = 
   return run();
 }
 
-export function insertSniperTrade({ chain, contract_address, symbol, dex, eth_spent, token_amount, buy_tx_hash, status = "ok", error = null, eth_received = null }) {
+export function insertSniperTrade({ chain, contract_address, symbol, dex, eth_spent, token_amount, buy_tx_hash, status = "ok", error = null, eth_received = null, user_id = null }) {
+  // Owner stamping (2026-09-19): every trade carries its user so ledgers,
+  // P/L, and the trades list can be per-user. NULL = legacy/unstamped
+  // (treated as admin-owned, same convention as the other tables).
   db.prepare(`
-    INSERT INTO sniper_trades (chain, contract_address, symbol, dex, eth_spent, token_amount, buy_tx_hash, status, error, eth_received)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(chain, contract_address, symbol ?? null, dex ?? null, eth_spent ?? null, token_amount ?? null, buy_tx_hash ?? null, status, error, eth_received ?? null);
+    INSERT INTO sniper_trades (chain, contract_address, symbol, dex, eth_spent, token_amount, buy_tx_hash, status, error, eth_received, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(chain, contract_address, symbol ?? null, dex ?? null, eth_spent ?? null, token_amount ?? null, buy_tx_hash ?? null, status, error, eth_received ?? null, user_id ?? null);
 }
 
 export function getSniperTrades(limit = 50, userId = null) {
@@ -700,24 +709,30 @@ export function getDipHoneypotExits() {
  * Full ok-trade history for one token on one chain, oldest first.
  * Buys carry eth_spent; sells carry eth_spent = 0 + eth_received.
  */
-export function getSniperTokenHistory(chain, contractAddress) {
+export function getSniperTokenHistory(chain, contractAddress, userId = null) {
+  // Per-user (2026-09-19): the ledger drives P/L + autosell math, so it MUST
+  // be owner-scoped. userId = the session user's own rows + NULL-legacy rows
+  // (pre-stamping history belongs to admin by convention). null userId =
+  // internal/full-ledger callers (wallet-sync dedupe) — unchanged.
   return db.prepare(`
     SELECT * FROM sniper_trades
     WHERE chain = ? AND contract_address = ? AND status = 'ok'
       AND (eth_spent IS NOT NULL OR eth_received IS NOT NULL)
+      ${userId ? "AND (user_id = ? OR user_id IS NULL)" : ""}
     ORDER BY created_at ASC, id ASC
-  `).all(chain, String(contractAddress).toLowerCase());
+  `).all(...(userId ? [chain, String(contractAddress).toLowerCase(), userId] : [chain, String(contractAddress).toLowerCase()]));
 }
 
 /** ALL rows for a token INCLUDING unpriced ones (eth_spent AND eth_received
  *  both NULL). wallet-sync's dedupe must see these too — a tx recorded
  *  unpriced by an older sync must not be re-inserted as a priced duplicate
  *  on the next pull (HASH 0xeedd4c58 was double-counted this way). */
-export function getSniperTokenHistoryUnpriced(chain, contractAddress) {
+export function getSniperTokenHistoryUnpriced(chain, contractAddress, userId = null) {
   return db.prepare(`
     SELECT * FROM sniper_trades
     WHERE chain = ? AND contract_address = ? AND status = 'ok'
       AND eth_spent IS NULL AND eth_received IS NULL
+      ${userId ? "AND (user_id = ? OR user_id IS NULL)" : ""}
     ORDER BY created_at ASC, id ASC
-  `).all(chain, String(contractAddress).toLowerCase());
+  `).all(...(userId ? [chain, String(contractAddress).toLowerCase(), userId] : [chain, String(contractAddress).toLowerCase()]));
 }

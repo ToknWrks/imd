@@ -8,8 +8,10 @@ function money(n, d = 2) {
   return Number(n).toLocaleString(undefined, { maximumFractionDigits: d });
 }
 
-export function sniperPage({ shell, esc, explorerLink, getChain, ctx }) {
-  const trades = getSniperTrades(30);
+export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = null }) {
+  // Per-user (2026-09-19): the trades list shows ONLY the session user's
+  // ledger (+ NULL-legacy rows). Previously unscoped — everyone saw everyone.
+  const trades = getSniperTrades(30, userId);
   const ethUsd = Number(ctx?.ethUsd || 0);
   const defaultEth = 0.01;
   const defaultUsd = ethUsd > 0 ? (defaultEth * ethUsd).toFixed(2) : "—";

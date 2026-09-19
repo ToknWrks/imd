@@ -14,7 +14,7 @@ import {
 } from "./db.mjs";
 import { insertSniperTrade, getSniperTokenHistory } from "./db.mjs";
 import { getSniperPosition, getTokenBalance, executeSniperSell, waitForTxReceipt } from "./sniper-extras.mjs";
-import { resolveSigner } from "./signer.mjs";
+import { resolveSigner, resolveSignerUser } from "./signer.mjs";
 
 const TICK_MS = 30_000;
 let running = false;
@@ -30,10 +30,13 @@ let timer = null;
  *  (HASH 2026-09-14: realized showed ≈0 instead of the true ≈+$5).
  *  Sell rows are SELL*, PROBE* (probe's sell leg), AUTOSELL* — "PROBE
  *  DELIVERED" doesn't start with SELL, which the old counters missed. */
-export function sniperLedgerStats(chainKey, token) {
+export function sniperLedgerStats(chainKey, token, userId = null) {
+  // Per-user (2026-09-19): P/L math must use ONLY the session user's ledger
+  // rows (+ NULL-legacy rows) — another user's trades on the same token must
+  // never shift this user's cost basis or realized P/L.
   let qty = 0, costPool = 0, boughtEth = 0, soldEth = 0, buys = 0, sells = 0, realizedEth = 0;
   let unknownSellProceeds = false;
-  for (const t of getSniperTokenHistory(chainKey, token)) {
+  for (const t of getSniperTokenHistory(chainKey, token, userId)) {
     const spent = Number(t.eth_spent || 0);
     const got = Number(t.eth_received || 0);
     const tokens = Math.abs(Number(t.token_amount || 0));
@@ -59,8 +62,8 @@ export function sniperLedgerStats(chainKey, token) {
 /** Open-position cost basis in ETH (chronological avg-cost pool) — used for
  *  autosell arm targets. NOTE: it is the OPEN basis, not net flows — arming
  *  against net flows would understate the target whenever past exits exist. */
-export function netCostEthFor(chainKey, token) {
-  return sniperLedgerStats(chainKey, token).openCostBasis;
+export function netCostEthFor(chainKey, token, userId = null) {
+  return sniperLedgerStats(chainKey, token, userId).openCostBasis;
 }
 
 async function tick() {
@@ -74,14 +77,18 @@ async function tick() {
         const chainKey = order.chain;
         const token = order.contract_address;
 
-        const signer = await resolveSigner(chainKey);
+        // Sign as the ORDER'S OWNER (2026-09-19): an armed autosell belongs to
+        // a specific user — sell THEIR tokens with THEIR signer, never the
+        // global env signer. Copilot-mode users get their browser-approval
+        // flow via resolveSignerUser; autonomy users get their session key.
+        const signer = await resolveSignerUser(order.user_id, chainKey);
         const bal = await getTokenBalance(chainKey, token, signer.address);
         if (!(bal.formatted > 0)) {
           settleSniperAutoSell(order.id, { error: "position balance is 0" });
           continue;
         }
 
-        const pos = await getSniperPosition(chainKey, token);
+        const pos = await getSniperPosition(chainKey, token, { walletOverride: signer.address });
         const ethUsd = Number(pos.ethUsd || 0);
         let openEth = 0;
         if (Number(pos.formatted) > 0 && ethUsd > 0 && Number(pos.valueUsd) > 0) {
@@ -110,6 +117,7 @@ async function tick() {
           token_amount: bal.formatted,
           buy_tx_hash: result.txHash,
           eth_received: result.ethReceived ?? null,
+          user_id: order.user_id ?? null,
         });
         settleSniperAutoSell(order.id, { txHash: result.txHash });
         console.log(`[autosell] triggered #${order.id} ${order.symbol ?? token} on ${chainKey}: tx ${result.txHash}`);

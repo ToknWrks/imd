@@ -71,7 +71,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
     } catch {}
     // The bot's current target: active token auto-resumes on page load.
     ctx.activeToken = getSniperActiveToken("ethereum");
-    send(sniperPage({ shell, esc, explorerLink, getChain, ctx }));
+    send(sniperPage({ shell, esc, explorerLink, getChain, ctx, userId: uid }));
     return true;
   }
 
@@ -81,7 +81,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
     try {
       const { chain } = JSON.parse(await readBody() || "{}");
       const chainKey = chain || "ethereum";
-      json({ ok: true, chain: chainKey, tokens: getSniperRecentTokens(chainKey), active: getSniperActiveToken(chainKey) });
+      json({ ok: true, chain: chainKey, tokens: getSniperRecentTokens(chainKey, 12, uid), active: getSniperActiveToken(chainKey) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
   }
@@ -150,7 +150,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
         const rate = await getEthUsd(chainKey).catch(() => 0);
         if (rate > 0) ethSpent = Number(result.usd_spent) / rate;
       }
-      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: symbol ?? null, dex: result.label || result.dex, eth_spent: ethSpent, token_amount: tokenAmount, buy_tx_hash: result.txHash });
+      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: symbol ?? null, dex: result.label || result.dex, eth_spent: ethSpent, token_amount: tokenAmount, buy_tx_hash: result.txHash, user_id: uid });
       // A snipe starts a bot session: the bought token becomes the chain's
       // active target until a different token is entered.
       touchSniperToken({ chain: chainKey, contract_address: token, symbol: symbol ?? null, activate: true });
@@ -158,7 +158,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       return true;
     } catch (e) {
       try {
-        if (body?.token) insertSniperTrade({ chain: body.chain || "ethereum", contract_address: String(body.token).toLowerCase(), symbol: body.symbol ?? null, dex: body.pool?.label || body.pool?.dex, eth_spent: body.ethAmount ? parseFloat(body.ethAmount) : null, status: "error", error: e.message });
+        if (body?.token) insertSniperTrade({ chain: body.chain || "ethereum", contract_address: String(body.token).toLowerCase(), symbol: body.symbol ?? null, dex: body.pool?.label || body.pool?.dex, eth_spent: body.ethAmount ? parseFloat(body.ethAmount) : null, status: "error", error: e.message, user_id: uid });
       } catch {}
       json({ ok: false, error: e.message }); return true;
     }
@@ -192,7 +192,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const probe = await probeSellDeliverability({ signer, chainKey, tokenAddress: token, amountHuman: probeTokens, pool: pool ?? null });
       // Record the probe as a trade so P/L reflects reality either way.
       if (probe.sellTxHash) {
-        insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: `PROBE ${probe.verdict.toUpperCase()}`, eth_spent: 0, token_amount: probeTokens, buy_tx_hash: probe.sellTxHash, eth_received: probe.verdict === "delivered" ? (probe.deltaRaw != null ? Number(probe.deltaRaw) / 1e18 : null) : 0 });
+        insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: `PROBE ${probe.verdict.toUpperCase()}`, eth_spent: 0, token_amount: probeTokens, buy_tx_hash: probe.sellTxHash, eth_received: probe.verdict === "delivered" ? (probe.deltaRaw != null ? Number(probe.deltaRaw) / 1e18 : null) : 0, user_id: uid });
       }
       if (probe.verdict === "delivered") setSniperTokenVerified(chainKey, token, "probe");
       json({ ok: true, ...probe, probeTokens, verified: probe.verdict === "delivered" });
@@ -251,9 +251,9 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const ethUsdNow = Number(await getEthUsd(chainKey).catch(() => 0));
       let ethSpent = Number(probeEth);
       if (buy.usd_spent != null) ethSpent = ethUsdNow > 0 ? Number(buy.usd_spent) / ethUsdNow : Number(probeEth);
-      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: symbol ?? null, dex: (buy.label || buy.dex || "BUY") + " (verify)", eth_spent: ethSpent, token_amount: bought, buy_tx_hash: buy.txHash });
+      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: symbol ?? null, dex: (buy.label || buy.dex || "BUY") + " (verify)", eth_spent: ethSpent, token_amount: bought, buy_tx_hash: buy.txHash, user_id: uid });
       if (sell.sellTxHash) {
-        insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: symbol ?? null, dex: `PROBE ${sell.verdict.toUpperCase()}`, eth_spent: 0, token_amount: bought, buy_tx_hash: sell.sellTxHash, eth_received: sell.verdict === "delivered" ? (sell.deltaRaw != null ? Number(sell.deltaRaw) / 1e18 : null) : 0 });
+        insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: symbol ?? null, dex: `PROBE ${sell.verdict.toUpperCase()}`, eth_spent: 0, token_amount: bought, buy_tx_hash: sell.sellTxHash, eth_received: sell.verdict === "delivered" ? (sell.deltaRaw != null ? Number(sell.deltaRaw) / 1e18 : null) : 0, user_id: uid });
       }
       if (sell.verdict === "delivered") setSniperTokenVerified(chainKey, token, "probe");
       const verified = getSniperTokenVerification(chainKey, token);
@@ -273,7 +273,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       // looks like the button is broken (nothing was recorded for any failed
       // Base attempt, so failures were indistinguishable from "never ran").
       try {
-        if (body?.token) insertSniperTrade({ chain: body.chain || "base", contract_address: String(body.token).toLowerCase(), symbol: body.symbol ?? null, dex: "VERIFY FAILED", eth_spent: null, status: "error", error: e.message });
+        if (body?.token) insertSniperTrade({ chain: body.chain || "base", contract_address: String(body.token).toLowerCase(), symbol: body.symbol ?? null, dex: "VERIFY FAILED", eth_spent: null, status: "error", error: e.message, user_id: uid });
       } catch {}
       json({ ok: false, error: e.message });
       return true;
@@ -325,7 +325,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       // (late sync backfill, mirrored strategy buys) leaked into the sold
       // units' basis and shifted P/L between realized and unrealized
       // (HASH 2026-09-14: realized showed ≈0 instead of the true ≈+$5).
-      const stats = sniperLedgerStats(chainKey, token);
+      const stats = sniperLedgerStats(chainKey, token, uid);
       const { boughtEth, soldEth, buys, sells, realizedEth: realizedPnl, unknownSellProceeds } = stats;
 
       // Open position valued in ETH via the same 0.01-ETH probe the position
@@ -382,7 +382,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
         json({ ok: false, error: `refusing to arm: this token's ledger has a sell with $0 proceeds (tx ${stiffed.buy_tx_hash ?? "?"}) — honeypot signature. The autosell would fire into a token that can't be sold.` });
         return true;
       }
-      const cost = netCostEthFor(chainKey, token);
+      const cost = netCostEthFor(chainKey, token, uid);
       const disc = await discoverPools(chainKey, token, "0.01").catch(() => null);
       const armed = armSniperAutoSell({
         chain: chainKey,
@@ -390,6 +390,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
         symbol: disc?.symbol ?? null,
         target_pct: pct,
         cost_at_arm_eth: cost,
+        user_id: uid,
       });
       json({ ok: true, id: armed, costEth: cost, targetEth: cost * (1 + pct / 100), symbol: disc?.symbol ?? null });
       return true;
@@ -410,7 +411,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
     try {
       const { chain } = JSON.parse(await readBody() || "{}");
       const chainKey = chain || "ethereum";
-      json({ ok: true, orders: getSniperAutoSells(chainKey), armed: getArmedSniperAutoSells(chainKey).length });
+      json({ ok: true, orders: getSniperAutoSells(chainKey, 10, uid), armed: getArmedSniperAutoSells(chainKey).length });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
   }
@@ -426,7 +427,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const amountHuman = bal.formatted * (pct / 100);
       if (!(amountHuman > 0)) throw new Error("token balance is 0");
       const result = await executeSniperSell({ signer, chainKey, tokenAddress: token, amountHuman, slippagePct: parseFloat(slippagePct)||3, pool });
-      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: "SELL " + (result.label || result.dex), eth_spent: 0, token_amount: amountHuman, buy_tx_hash: result.txHash, eth_received: result.ethReceived ?? null });
+      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: "SELL " + (result.label || result.dex), eth_spent: 0, token_amount: amountHuman, buy_tx_hash: result.txHash, eth_received: result.ethReceived ?? null, user_id: uid });
       // Selling this token makes it the bot's active target — the wallet's
       // position you're acting on should follow the token in the box.
       touchSniperToken({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol ?? null, activate: true });
@@ -491,7 +492,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       // Sync reads the USER's wallet (2026-09-18) — the session user's SCW /
       // connected wallet, not the global env signer.
       const wallet = readWallet || (await resolveSigner(chainKey)).address;
-      const r = await syncExternalTrades({ chainKey, tokenAddress: token, wallet });
+      const r = await syncExternalTrades({ chainKey, tokenAddress: token, wallet, userId: uid });
       json({ ok: true, ...r });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
