@@ -228,10 +228,11 @@ export async function backfillGasFromChain() {
       UNION ALL
       -- sniper_autosells has no user_id: attribute to the owner of that token's
       -- sniper_trades ledger (autosells execute against the user's position).
-      SELECT (SELECT user_id FROM sniper_trades s
+      -- (The subquery must alias its columns to match the UNION: user_id, h.)
+      SELECT (SELECT s.user_id FROM sniper_trades s
                WHERE s.chain = a.chain AND s.contract_address = a.contract_address
-                 AND s.user_id IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS user_id,
-             a.sell_tx_hash AS tx_hash
+                 AND s.user_id IS NOT NULL ORDER BY s.created_at DESC LIMIT 1) AS user_id,
+             a.sell_tx_hash AS h
         FROM sniper_autosells a WHERE a.sell_tx_hash IS NOT NULL
       UNION ALL
       -- mm_trades has no user_id yet (see backfill note above)
