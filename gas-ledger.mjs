@@ -217,14 +217,14 @@ export async function backfillGasFromChain() {
   const ownerOf = db.prepare(`
     SELECT user_id FROM (
       SELECT user_id, buy_tx_hash AS h FROM sniper_trades WHERE buy_tx_hash IS NOT NULL AND user_id IS NOT NULL
+      -- sniper_trades has NO sell_tx_hash column (sells are rows in the same
+      -- table with a SELL dex marker) — remove the phantom reference.
       UNION ALL
-      SELECT user_id, sell_tx_hash FROM sniper_trades WHERE sell_tx_hash IS NOT NULL AND user_id IS NOT NULL
+      SELECT user_id, buy_tx_hash AS h FROM dip_trades WHERE buy_tx_hash IS NOT NULL AND user_id IS NOT NULL
       UNION ALL
-      SELECT user_id, buy_tx_hash FROM dip_trades WHERE buy_tx_hash IS NOT NULL AND user_id IS NOT NULL
+      SELECT user_id, sell_tx_hash AS h FROM dip_trades WHERE sell_tx_hash IS NOT NULL AND user_id IS NOT NULL AND execution_kind = 'exit'
       UNION ALL
-      SELECT user_id, sell_tx_hash FROM dip_trades WHERE sell_tx_hash IS NOT NULL AND user_id IS NOT NULL AND execution_kind = 'exit'
-      UNION ALL
-      SELECT user_id, tx_hash FROM strategy_executions WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL
+      SELECT user_id, tx_hash AS h FROM strategy_executions WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL
       UNION ALL
       -- sniper_autosells has no user_id: attribute to the owner of that token's
       -- sniper_trades ledger (autosells execute against the user's position).
