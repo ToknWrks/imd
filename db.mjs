@@ -165,14 +165,16 @@ ensureColumn("gas_spend", "user_id", "user_id TEXT");
 ensureColumn("sniper_autosells", "user_id", "user_id TEXT");
 
 // One-time backfill: rows created before isolation get the admin/first user so
-// they don't vanish from the owner's view.
+// they don't vanish from the owner's view. EXCEPTION (2026-09-19): keep
+// sniper_recent_tokens + sniper_trades NULL-legacy rows SHARED — the token
+// memory and trade ledger are seeded history; stamping them to admin makes
+// them invisible to every other user (the "lost token input memory" bug).
 try {
   const _defUser = _defaultUserId();
   if (_defUser) {
-    for (const t of ["dip_watchers", "dip_trades", "accumulation_strategies", "strategy_executions", "sniper_trades", "copilot_requests", "zooch_reviews"]) {
+    for (const t of ["dip_watchers", "dip_trades", "accumulation_strategies", "strategy_executions", "copilot_requests", "zooch_reviews"]) {
       db.prepare(`UPDATE ${t} SET user_id = ? WHERE user_id IS NULL`).run(_defUser);
     }
-    db.prepare(`UPDATE sniper_recent_tokens SET user_id = ? WHERE user_id IS NULL`).run(_defUser);
   }
 } catch (e) {
   console.error(`[db] isolation backfill skipped: ${e.message}`);
