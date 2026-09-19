@@ -191,9 +191,11 @@ export async function backfillGasFromChain() {
       UNION ALL
       SELECT sell_tx_hash, chain, user_id FROM sniper_autosells WHERE sell_tx_hash IS NOT NULL
       UNION ALL
-      SELECT tx_hash, s.chain, m.user_id
+      -- mm_trades has no user_id column yet (MM never migrated to per-user);
+      -- gas for MM legs lands in the legacy NULL-owner bucket until it is.
+      SELECT m.tx_hash, s.chain, NULL AS user_id
        FROM mm_trades m JOIN mm_strategies s ON s.id = m.strategy_id
-       WHERE tx_hash IS NOT NULL AND m.dry_run = 0
+       WHERE m.tx_hash IS NOT NULL AND m.dry_run = 0
     ) t WHERE NOT EXISTS (SELECT 1 FROM gas_spend g WHERE g.tx_hash = t.tx_hash)
   `).all();
   let recorded = 0;
@@ -220,7 +222,8 @@ export async function backfillGasFromChain() {
       UNION ALL
       SELECT user_id, tx_hash FROM strategy_executions WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL
       UNION ALL
-      SELECT user_id, tx_hash FROM mm_trades WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL AND dry_run = 0
+      -- mm_trades has no user_id yet (see backfill note above)
+      SELECT NULL AS user_id, tx_hash FROM mm_trades WHERE tx_hash IS NOT NULL AND dry_run = 0
     ) WHERE LOWER(h) = ? LIMIT 1
   `);
   let stamped = 0;
