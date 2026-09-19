@@ -270,6 +270,12 @@ export async function handleAuth(req, res, { url, method, readBody, json, send, 
 
   if (isAuthed(req)) return false;
 
+  // Public pages (2026-09-19): /swap is intentionally reachable without a
+  // session — the SwapKit widget handles its own wallet connection, and the
+  // page serves no per-user data. Extend this list if other public pages
+  // appear; anything serving user data must NEVER go here.
+  if (url === "/swap" && method === "GET") return false;
+
   // Unauthenticated: API/SSE get 401 JSON; pages get the normal shell with a
   // connect-prompt body — the header's Connect-wallet button IS the sign-in
   // flow (no separate gate document).

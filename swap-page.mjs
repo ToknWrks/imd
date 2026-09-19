@@ -13,7 +13,7 @@ export function swapPage({ shell }) {
   return shell("Swap", `
     <div class="card">
       <h2>Swap</h2>
-      <p class="hint">Cross-chain swaps powered by SwapKit. Connect a wallet in the widget below (or via the header Connect button).</p>
+      <p class="hint">Cross-chain swaps powered by SwapKit. Connect a wallet in the widget below.</p>
       <!-- SwapKit Widget -->
       <script type="module" src="https://cdn.swapkit.dev/widget/latest/swapkit-widget.js"><\/script>
       <swapkit-widget
