@@ -303,6 +303,7 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         <button class="secondary" data-id="${esc(w.id)}" data-pool="${esc(w.pool_address ?? "")}" onclick="openStrategyEditor(this)" ${strategy ? `data-existing="1" data-budget="${Number(strategy.total_budget_usd)}" data-cadence="${strategy.cadence_minutes / 1440}" data-base="${Number(strategy.base_buy_usd)}" data-threshold="${Number(strategy.dip_threshold_usd)}" data-dipbuy="${Number(strategy.dip_buy_usd)}" data-period="${Math.max(1, Math.round((Date.parse(strategy.end_at + "Z") - Date.now()) / 86400000))}" data-slippage="${Number(strategy.slippage_pct)}"` : ""}>${strategy ? "Edit" : "Set plan"}</button>
         ${strategyActive ? `<button class="secondary" onclick="pauseStrategy('${w.id}')">Pause plan</button>` : ""}
         <button class="secondary" onclick="refreshPosition('${w.id}', this)">Refresh</button>
+        <button class="secondary" onclick="syncWatcherWallet('${w.id}', this)" title="Pull external trades (launchpad/curve buys, Uniswap-UI sells) into this token's ledger">Sync</button>
         <button class="secondary" onclick="toggleWatcher('${w.id}', ${w.active ? 0 : 1})">${w.active ? "Pause token" : (getAccumulationStrategy(w.id) ? "Resume token" : "Set plan to arm")}</button>
         <button class="danger" onclick="removeWatcher('${w.id}')">Delete</button>
         <button class="danger" onclick="openExitModal(this)" data-id="${esc(w.id)}" data-symbol="${esc(w.symbol ?? "token")}" data-balance="${w.wallet_balance != null ? Number(w.wallet_balance) : ""}" data-price="${w.price_usd != null ? Number(w.price_usd) : ""}" data-chain="${esc(w.chain || "ethereum")}" data-token="${esc(w.contract_address)}" data-pool="${esc(w.pool_address ?? "")}" ${w.wallet_balance != null && Number(w.wallet_balance) > 0 ? "" : "disabled"}>Exit</button>
@@ -549,6 +550,17 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
           if (!j.ok) alert(j.error);
         } catch (e) { alert(e.message); }
         location.reload();
+      }
+      async function syncWatcherWallet(id, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Syncing…';
+        try {
+          const r = await fetch('/api/watchers/' + id + '/wallet-sync', { method: 'POST' });
+          const j = await r.json();
+          if (!j.ok) { alert(j.error); btn.disabled = false; btn.textContent = 'Sync'; return; }
+          btn.textContent = 'Synced';
+          setTimeout(function () { location.reload(); }, 900);
+        } catch (e) { alert(e.message); btn.disabled = false; btn.textContent = 'Sync'; }
       }
       let exitCtx = null;
       function openExitModal(button) {
@@ -2188,6 +2200,30 @@ const server = createServer(async (req, res) => {
       const updated = getDipWatcher(id);
       if (updated.position_error) return json({ ok: false, error: updated.position_error });
       return json({ ok: true, watcher: updated });
+    }
+
+    // Wallet-sync for a tracked token (2026-09-19): pull external trades
+    // (launchpad/curve buys, Uniswap-UI sells) into the sniper ledger — the
+    // ledger feeds this token's P/L. Scans ALL the user's read wallets.
+    if (url.startsWith("/api/watchers/") && url.endsWith("/wallet-sync") && method === "POST") {
+      const id = decodeURIComponent(url.split("/")[3]);
+      const watcher = getDipWatcher(id);
+      if (!watcher) return json({ ok: false, error: "token not found" });
+      const uid = sessionAddress(req);
+      const chainKey = watcher.chain || "ethereum";
+      try {
+        const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+        const wallets = uid ? await resolveUserReadWallets(uid, chainKey) : [watcher.user_id].filter(Boolean);
+        const { syncExternalTrades } = await import("./wallet-sync.mjs");
+        const per = [];
+        for (const w of wallets) {
+          per.push(await syncExternalTrades({ chainKey, tokenAddress: watcher.contract_address, wallet: w, userId: uid }));
+        }
+        const totals = per.reduce((acc, x) => ({ added: acc.added + x.added, skipped: acc.skipped + x.skipped }), { added: 0, skipped: 0 });
+        await computeAndStorePosition(watcher); // fresh balance + P/L after import
+        const updated = getDipWatcher(id);
+        return json({ ok: true, wallets, ...totals, watcher: updated });
+      } catch (e) { return json({ ok: false, error: e.message }); }
     }
 
     if (url.startsWith("/api/watchers/") && method === "PATCH") {
