@@ -17,6 +17,7 @@ import { handleSniperRequest } from "./sniper-ui.mjs";
 import { startSniperAutoSellLoop } from "./sniper-autosell.mjs";
 import { handleMmRequest } from "./mm-ui.mjs";
 import { handleVerifyRequest } from "./verify-ui.mjs";
+import { handleSwapRequest } from "./swap-ui.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENV_PATH = resolve(__dirname, ".env");
@@ -175,6 +176,7 @@ function shell(title, body, active = "") {
       <a class="nav-link ${active === "mm" ? "active" : ""}" href="/mm">MM</a> -->
       <a class="nav-link ${active === "trades" ? "active" : ""}" href="/trades">Trades</a>
       <a class="nav-link ${active === "settings" ? "active" : ""}" href="/settings">Settings</a>
+      <a class="nav-link ${active === "swap" ? "active" : ""}" href="/swap">Swap</a>
       ${WALLET_CONNECT_BUTTON}
       ${COPILOT_BADGE}
       ${WALLET_NAV_BUTTON}
@@ -1799,6 +1801,7 @@ const server = createServer(async (req, res) => {
     }
     if (await handleMmRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain })) return;
     if (await handleVerifyRequest(url, method, { readBody, json, send, shell, esc })) return;
+    if (await handleSwapRequest(url, method, { send, shell })) return;
     if (url === "/trades" && method === "GET") return send(tradesPage(sessionAddress(req)));
     if (url === "/settings" && method === "GET") return send(await settingsPage("", sessionAddress(req)));
 
