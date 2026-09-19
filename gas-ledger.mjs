@@ -189,7 +189,11 @@ export async function backfillGasFromChain() {
       UNION ALL
       SELECT buy_tx_hash, chain, user_id FROM sniper_trades WHERE buy_tx_hash IS NOT NULL
       UNION ALL
-      SELECT sell_tx_hash, chain, user_id FROM sniper_autosells WHERE sell_tx_hash IS NOT NULL
+      -- sniper_autosells has no user_id column yet; resolve via sniper_trades'
+      -- matching token+chain (same user's ledger) in the owner-stamp pass.
+      SELECT a.sell_tx_hash, a.chain, NULL AS user_id
+        FROM sniper_autosells a
+       WHERE a.sell_tx_hash IS NOT NULL
       UNION ALL
       -- mm_trades has no user_id column yet (MM never migrated to per-user);
       -- gas for MM legs lands in the legacy NULL-owner bucket until it is.
@@ -221,6 +225,14 @@ export async function backfillGasFromChain() {
       SELECT user_id, sell_tx_hash FROM dip_trades WHERE sell_tx_hash IS NOT NULL AND user_id IS NOT NULL AND execution_kind = 'exit'
       UNION ALL
       SELECT user_id, tx_hash FROM strategy_executions WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL
+      UNION ALL
+      -- sniper_autosells has no user_id: attribute to the owner of that token's
+      -- sniper_trades ledger (autosells execute against the user's position).
+      SELECT (SELECT user_id FROM sniper_trades s
+               WHERE s.chain = a.chain AND s.contract_address = a.contract_address
+                 AND s.user_id IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS user_id,
+             a.sell_tx_hash AS tx_hash
+        FROM sniper_autosells a WHERE a.sell_tx_hash IS NOT NULL
       UNION ALL
       -- mm_trades has no user_id yet (see backfill note above)
       SELECT NULL AS user_id, tx_hash FROM mm_trades WHERE tx_hash IS NOT NULL AND dry_run = 0
