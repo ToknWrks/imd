@@ -57,7 +57,7 @@ const norm = (h) => String(h ?? "").toLowerCase();
  * throwing — gas accounting must never break a swap flow that already
  * succeeded on-chain.
  */
-export async function recordGasForTx(txHash, chainKey = "ethereum") {
+export async function recordGasForTx(txHash, chainKey = "ethereum", userId = null) {
   const hash = norm(txHash);
   if (!/^0x[0-9a-f]{64}$/.test(hash)) return false;
   try {
@@ -72,9 +72,9 @@ export async function recordGasForTx(txHash, chainKey = "ethereum") {
       if (ethUsd > 0) gasUsd = ethNative * ethUsd;
     }
     db.prepare(`
-      INSERT OR IGNORE INTO gas_spend (tx_hash, chain, block_number, gas_used, effective_gas_price, eth_native, gas_usd)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(hash, chainKey, receipt.blockNumber ?? null, gasUsed.toString(), gasPrice.toString(), ethNative, gasUsd);
+      INSERT OR IGNORE INTO gas_spend (tx_hash, chain, block_number, gas_used, effective_gas_price, eth_native, gas_usd, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(hash, chainKey, receipt.blockNumber ?? null, gasUsed.toString(), gasPrice.toString(), ethNative, gasUsd, userId);
     return true;
   } catch (e) {
     console.error(`[gas-ledger] record ${hash.slice(0, 14)}… failed: ${e.message}`);
@@ -83,13 +83,16 @@ export async function recordGasForTx(txHash, chainKey = "ethereum") {
 }
 
 /** All-time totals: native units spent on gas and their USD value. */
-export function getGasTotals() {
+export function getGasTotals(userId = null) {
+  const userFilter = userId ? "WHERE user_id = ?" : "";
+  const userParams = userId ? [userId] : [];
   const row = db.prepare(`
     SELECT COALESCE(SUM(eth_native), 0) AS ethNative,
            COALESCE(SUM(gas_usd), 0)    AS usd,
            COUNT(*)                     AS txs
     FROM gas_spend
-  `).get();
+    ${userFilter}
+  `).get(...userParams);
   return { ethNative: row.ethNative ?? 0, usd: row.usd ?? 0, txs: row.txs ?? 0 };
 }
 
@@ -116,7 +119,12 @@ export function getGasForHashes(hashes) {
  * Approvals/wraps don't belong to any trade table → "Approvals & other"
  * (honest bucket rather than silently misattributing them to a product).
  */
-export function getGasBreakdown() {
+export function getGasBreakdown(_legacy = null, userId = null) {
+  // Per-user (2026-09-19): gas rows carry user_id (stamped by recordGasForTx/
+  // backfillGasFromChain via the owning trade row). Null userId = all users
+  // (legacy admin view / pre-stamp rows).
+  const userFilter = userId ? "WHERE g.user_id = ?" : "";
+  const userParams = userId ? [userId] : [];
   // mm tables may not exist if mm-db.mjs was never imported in this process —
   // the MM EXISTS subqueries are added only when those tables are present.
   const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
@@ -147,10 +155,11 @@ export function getGasBreakdown() {
            COALESCE(SUM(g.eth_native), 0) AS eth,
            COALESCE(SUM(g.gas_usd), 0)    AS usd
     FROM gas_spend g
+    ${userFilter}
     GROUP BY chain, product
     ORDER BY chain, product
-  `).all();
-  const totals = getGasTotals();
+  `).all(...userParams);
+  const totals = getGasTotals(userId);
   return { rows, totals };
 }
 
@@ -162,36 +171,67 @@ export function getGasBreakdown() {
  */
 export async function backfillGasFromChain() {
   const pending = db.prepare(`
-    SELECT DISTINCT t.tx_hash AS hash, t.chain AS chain FROM (
-      SELECT buy_tx_hash AS tx_hash, w.chain AS chain
+    SELECT DISTINCT t.tx_hash AS hash, t.chain AS chain, t.user_id AS user_id FROM (
+      SELECT buy_tx_hash AS tx_hash, w.chain AS chain, t.user_id AS user_id
         FROM dip_trades t JOIN dip_watchers w ON w.id = t.watcher_id
        WHERE buy_tx_hash IS NOT NULL
       UNION ALL
       -- ONLY exit rows' sell_tx_hash is ours. A dip row's sell_tx_hash is the
       -- EXTERNAL whale sell that triggered the dip — fetching its receipt
       -- recorded whale gas as our spend ($10 IMD row, 2026-09-13).
-      SELECT sell_tx_hash, w.chain
+      SELECT sell_tx_hash, w.chain, t.user_id
         FROM dip_trades t JOIN dip_watchers w ON w.id = t.watcher_id
        WHERE sell_tx_hash IS NOT NULL AND t.execution_kind = 'exit'
       UNION ALL
-      SELECT tx_hash, w.chain
+      SELECT tx_hash, w.chain, s.user_id
         FROM strategy_executions s JOIN dip_watchers w ON w.id = s.watcher_id
        WHERE tx_hash IS NOT NULL AND s.status = 'ok'
       UNION ALL
-      SELECT buy_tx_hash, chain FROM sniper_trades WHERE buy_tx_hash IS NOT NULL
+      SELECT buy_tx_hash, chain, user_id FROM sniper_trades WHERE buy_tx_hash IS NOT NULL
       UNION ALL
-      SELECT sell_tx_hash, chain FROM sniper_autosells WHERE sell_tx_hash IS NOT NULL
+      SELECT sell_tx_hash, chain, user_id FROM sniper_autosells WHERE sell_tx_hash IS NOT NULL
       UNION ALL
-      SELECT tx_hash, s.chain FROM mm_trades m JOIN mm_strategies s ON s.id = m.strategy_id
+      SELECT tx_hash, s.chain, m.user_id
+       FROM mm_trades m JOIN mm_strategies s ON s.id = m.strategy_id
        WHERE tx_hash IS NOT NULL AND m.dry_run = 0
     ) t WHERE NOT EXISTS (SELECT 1 FROM gas_spend g WHERE g.tx_hash = t.tx_hash)
   `).all();
   let recorded = 0;
   let missing = 0;
-  for (const { hash, chain } of pending) {
-    const ok = await recordGasForTx(hash, chain || "ethereum");
+  for (const { hash, chain, user_id } of pending) {
+    const ok = await recordGasForTx(hash, chain || "ethereum", user_id || null);
     if (ok) recorded += 1; else missing += 1;
   }
+  // Stamp owners onto rows recorded BEFORE per-user stamping existed (the
+  // user_id column existed but was never populated). Resolve each hash's
+  // owner from the trade tables; unknown → left NULL (admin/legacy bucket).
+  const unstamped = db.prepare(`
+    SELECT tx_hash FROM gas_spend WHERE user_id IS NULL
+  `).all();
+  const ownerOf = db.prepare(`
+    SELECT user_id FROM (
+      SELECT user_id, buy_tx_hash AS h FROM sniper_trades WHERE buy_tx_hash IS NOT NULL AND user_id IS NOT NULL
+      UNION ALL
+      SELECT user_id, sell_tx_hash FROM sniper_trades WHERE sell_tx_hash IS NOT NULL AND user_id IS NOT NULL
+      UNION ALL
+      SELECT user_id, buy_tx_hash FROM dip_trades WHERE buy_tx_hash IS NOT NULL AND user_id IS NOT NULL
+      UNION ALL
+      SELECT user_id, sell_tx_hash FROM dip_trades WHERE sell_tx_hash IS NOT NULL AND user_id IS NOT NULL AND execution_kind = 'exit'
+      UNION ALL
+      SELECT user_id, tx_hash FROM strategy_executions WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL
+      UNION ALL
+      SELECT user_id, tx_hash FROM mm_trades WHERE tx_hash IS NOT NULL AND user_id IS NOT NULL AND dry_run = 0
+    ) WHERE LOWER(h) = ? LIMIT 1
+  `);
+  let stamped = 0;
+  for (const { tx_hash } of unstamped) {
+    const owner = ownerOf.get(tx_hash.toLowerCase());
+    if (owner?.user_id) {
+      db.prepare("UPDATE gas_spend SET user_id = ? WHERE tx_hash = ?").run(owner.user_id, tx_hash);
+      stamped += 1;
+    }
+  }
+  if (stamped) console.log(`[gas-ledger] stamped ${stamped}/${unstamped.length} legacy gas rows with their owner`);
   const totals = getGasTotals();
-  return { found: pending.length, recorded, missing, totals };
+  return { found: pending.length, recorded, missing, totals, stamped };
 }

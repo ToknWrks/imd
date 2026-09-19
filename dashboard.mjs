@@ -714,12 +714,15 @@ function overviewChart(items, formatValue = (v) => "$" + v.toLocaleString(undefi
   }).join("")}</div>`;
 }
 
-function overviewPage() {
-  return overviewPageInner();
+function overviewPage(userId = null) {
+  return overviewPageInner(userId);
 }
 
-async function overviewPageInner() {
-  const watchers = getDipWatchers().filter((w) => Number(w.wallet_balance_usd ?? 0) !== 0 || w.wallet_balance_usd != null);
+async function overviewPageInner(userId = null) {
+  // Per-user (2026-09-19): overview renders the SESSION USER's positions,
+  // trades, and gas — same isolation as /tokens and /sniper. Null = legacy
+  // all-users view (only for internal calls without a session).
+  const watchers = getDipWatchers(userId).filter((w) => Number(w.wallet_balance_usd ?? 0) !== 0 || w.wallet_balance_usd != null);
   // ── Accumulate card: per-token USD wallet value (same chart as /tokens)
   const accItems = watchers
     .map((w) => ({
@@ -741,7 +744,7 @@ async function overviewPageInner() {
 
   // ── Sniper card: realized P/L per chain (buys eth_spent, sells eth_received)
   const sniperByChain = {};
-  for (const t of getSniperTrades(200)) {
+  for (const t of getSniperTrades(200, userId)) {
     const chain = t.chain || "ethereum";
     const b = (sniperByChain[chain] ??= { buys: 0, sells: 0, txs: 0 });
     b.txs += 1;
@@ -799,8 +802,8 @@ async function overviewPageInner() {
       <p class="hint" style="margin:0.7rem 0 0">Bot inventory per strategy, valued at last trade price · total $${mmTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}${mmItems.some((i) => i.pl !== 0) ? ` · realized P/L ${mmItems.reduce((s, i) => s + i.pl, 0) >= 0 ? "+" : "−"}$${Math.abs(mmItems.reduce((s, i) => s + i.pl, 0)).toFixed(2)}` : ""} · badge = unrealized P/L % of cost basis</p>
     </div>`;
 
-  // ── Gas card: chain × product breakdown (server-rendered)
-  const gas = getGasBreakdown();
+  // ── Gas card: chain × product breakdown (server-rendered, per user)
+  const gas = getGasBreakdown(null, userId);
   const gasCard = `
     <div class="card">
       <h2>Gas expense</h2>
@@ -1746,7 +1749,7 @@ const server = createServer(async (req, res) => {
     if (await handleAuth(req, res, { url, method, readBody, json, send })) return;
 
     if (url === "/" || url === "") return redirect("/overview");
-    if (url === "/overview" && method === "GET") return send(await overviewPage());
+    if (url === "/overview" && method === "GET") return send(await overviewPage(sessionAddress(req)));
     if (url === "/tokens" && method === "GET") return send(await watchersPage(undefined, requestUrl.searchParams.get("plan"), sessionAddress(req)));
     if (url.startsWith("/tokens/") && method === "GET") {
       const page = await tokenDetailPage(decodeURIComponent(url.split("/")[2]), sessionAddress(req));

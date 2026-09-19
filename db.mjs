@@ -590,7 +590,10 @@ export function insertSniperTrade({ chain, contract_address, symbol, dex, eth_sp
   `).run(chain, contract_address, symbol ?? null, dex ?? null, eth_spent ?? null, token_amount ?? null, buy_tx_hash ?? null, status, error, eth_received ?? null);
 }
 
-export function getSniperTrades(limit = 50) {
+export function getSniperTrades(limit = 50, userId = null) {
+  // Per-user (2026-09-19): overview passes the session user; null = all
+  // (legacy/internal callers that legitimately need the full ledger).
+  if (userId) return db.prepare("SELECT * FROM sniper_trades WHERE user_id = ? ORDER BY created_at DESC LIMIT ?").all(userId, limit);
   return db.prepare("SELECT * FROM sniper_trades ORDER BY created_at DESC LIMIT ?").all(limit);
 }
 
