@@ -69,24 +69,20 @@ export function AUTH_LOGIN_PAGE(projectId, rpcUrl) {
     err.textContent = '';
     try {
       btn.disabled = true;
-      // FORCE ACCOUNT SELECTION (2026-09-19): AppKit caches its connection in
-      // localStorage — a previously-used wallet silently re-connects and the
-      // modal never shows the account picker, so users think they switched
-      // wallets while the server session stayed on the old address. Disconnect
-      // any stale session first, and WAIT for the teardown to settle before
-      // opening the modal — signing through a half-torn-down provider hangs
-      // forever (personal_sign spins, no prompt ever appears).
-      try { await modal.disconnect?.(); } catch {}
-      try { localStorage.removeItem('@appkit/connection'); localStorage.removeItem('@w3m/connected'); localStorage.removeItem('wagmi.connected'); localStorage.removeItem('wagmi.wallet'); } catch {}
-      await new Promise((r) => setTimeout(r, 250)); // let AppKit finish teardown
-      // Open the AppKit universal modal — user picks ANY wallet.
+      // NOTE (2026-09-19): we deliberately do NOT pre-disconnect or wipe
+      // AppKit's cache here. A pre-disconnect leaves AppKit's internal
+      // connectors half-torn-down: the modal then fails to reconnect any
+      // wallet (connect prompts loop forever, no signature prompt), and a
+      // half-alive provider makes personal_sign hang silently. The wallet's
+      // SIGNATURE itself proves which address is logging in — the server
+      // session is keyed off the signed address, not off AppKit's internal
+      // state. So: open the modal, let AppKit manage its own connection.
       modal.open();
 
-      // Wait for a FRESH connection — do NOT trust an "immediate" address
-      // here: right after a disconnect, AppKit can still report the cached
-      // address while its provider is unusable. Only a state EVENT (subscribe
-      // firing with an address) proves the wallet genuinely connected.
+      // Wait for a connection event (works for both fresh connects and
+      // wallets AppKit auto-reconnects from its own cache).
       const address = await new Promise((resolve, reject) => {
+        if (modal.getAddress?.()) { resolve(modal.getAddress()); return; }
         const timeout = setTimeout(() => reject(new Error('No wallet connected within 120s — try again')), 120000);
         const unsub = modal.subscribeState((state) => {
           if (state.address) { unsub(); clearTimeout(timeout); resolve(state.address); }
