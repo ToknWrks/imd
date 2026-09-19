@@ -498,8 +498,20 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       // Sync reads the USER's wallet (2026-09-18) — the session user's SCW /
       // connected wallet, not the global env signer.
       const wallet = readWallet || (await resolveSigner(chainKey)).address;
-      const r = await syncExternalTrades({ chainKey, tokenAddress: token, wallet, userId: uid });
-      json({ ok: true, ...r });
+      // Scan EVERY read wallet (2026-09-19): launchpad/curve buys execute from
+      // the browser EOA while app-signed trades hit the SCW — syncing one
+      // wallet alone misses the other's external trades entirely.
+      const wallets = readWallets ?? (wallet ? [wallet] : null) ?? [(await resolveSigner(chainKey)).address];
+      // SEQUENTIAL, not parallel: the dedupe set (known tx hashes) is read at
+      // the start of each sync — two concurrent syncs would both see an empty
+      // set and double-insert any tx touching both wallets (e.g. a transfer
+      // between a user's own SCW and EOA).
+      const per = [];
+      for (const w of wallets) {
+        per.push(await syncExternalTrades({ chainKey, tokenAddress: token, wallet: w, userId: uid }));
+      }
+      const r = per.reduce((acc, x) => ({ added: acc.added + x.added, skipped: acc.skipped + x.skipped }), { added: 0, skipped: 0 });
+      json({ ok: true, wallets, ...r });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
   }
