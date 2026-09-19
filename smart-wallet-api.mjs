@@ -174,6 +174,33 @@ export async function resolveUserReadWallet(userId, chainKey = "ethereum") {
   return (await resolveSigner(chainKey)).address;
 }
 
+/**
+ * BOTH of the user's read wallets, deduped: registry SCW (app-signed trades)
+ * + the login/browser EOA (launchpad & curve buys land here). Callers pass
+ * the list to computeWalletPosition({ walletAddresses }) so balances and cost
+ * basis reflect the user's TOTAL holdings across custody boundaries.
+ */
+export async function resolveUserReadWallets(userId, chainKey = "ethereum") {
+  const out = [];
+  const push = (a) => { if (a && /^0x[0-9a-fA-F]{40}$/.test(a) && !out.some((x) => x.toLowerCase() === a.toLowerCase())) out.push(getAddress(a)); };
+  if (userId && /^0x[0-9a-fA-F]{40}$/.test(userId)) {
+    try {
+      const rec = getWalletRecord(userId);
+      if (rec?.sessionKeyEnc) {
+        const sk = decryptSessionKey(rec.sessionKeyEnc);
+        if (sk) {
+          const client = await getSmartAccountClient(chainKey, { sessionKey: sk });
+          push(client.account.address);
+        }
+      }
+    } catch { /* SCW optional — the EOA read still works */ }
+    // The login address itself (the browser EOA).
+    push(userId);
+  }
+  if (!out.length) out.push(await resolveUserReadWallet(userId, chainKey));
+  return out;
+}
+
 function dollarSymbol(chainKey) {
   const dep = getChain(chainKey);
   return dep.dollarDecimals === 6 ? "USDC" : "USD";

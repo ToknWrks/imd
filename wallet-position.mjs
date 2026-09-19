@@ -109,7 +109,7 @@ function rawAmount(t, decimals) {
  *   realizedPlUsd: number, transferCount: number, truncated: boolean,
  * }>}
  */
-export async function computeWalletPosition({ contractAddress, decimals, walletAddress, chainKey = "ethereum", poolOverride = null }) {
+export async function computeWalletPosition({ contractAddress, decimals, walletAddress, walletAddresses = null, chainKey = "ethereum", poolOverride = null }) {
   const dep = getChain(chainKey);
   const tokenLower = contractAddress.toLowerCase();
   const dollarLower = dep.dollar.toLowerCase();
@@ -158,8 +158,13 @@ export async function computeWalletPosition({ contractAddress, decimals, walletA
   const isStockQuote = !!v4Pool && !isDollarQuote && !!otherCurrency
     && otherCurrency.toLowerCase() !== ETH_ADDRESS_ZERO
     && otherCurrency.toLowerCase() !== dep.weth.toLowerCase();
-  const [rawBalance, poolPrice, ethUsd] = await Promise.all([
-    getErc20Balance(contractAddress, walletAddress, chainKey),
+  const wallets = walletAddresses ?? (walletAddress ? [walletAddress] : []);
+  const [balancesRaw, poolPrice, ethUsd] = await Promise.all([
+    // Sum the token across EVERY read wallet (2026-09-19): a user's holdings
+    // legitimately split between their SCW (app-signed trades) and their
+    // browser EOA (launchpad/curve buys). Reading one wallet alone reports 0
+    // whenever the tokens sit in the other.
+    Promise.all(wallets.map((w) => getErc20Balance(contractAddress, w, chainKey))),
     // Dollar-quote pools price directly in USD from slot0 (V3 pools use a raw
     // eth_call — same ABI quirk as findBestV3DollarPool); ETH pools yield
     // token-per-ETH and convert via Chainlink.
@@ -174,7 +179,8 @@ export async function computeWalletPosition({ contractAddress, decimals, walletA
               : getTokenSpotPriceEth({ poolAddress: v3Pool.address, wethIsToken0: v3Pool.token0.toLowerCase() === dep.weth.toLowerCase(), tokenDecimals: decimals }, undefined, chainKey))),
     getEthUsdPrice(chainKey),
   ]);
-  const balance = Number(formatUnits(rawBalance, decimals));
+  const summed = balancesRaw.reduce((a, b) => a + b, 0n);
+  const balance = Number(formatUnits(summed, decimals));
   let priceUsd;
   if (curvePriceUsd != null) {
     priceUsd = curvePriceUsd;
@@ -186,10 +192,29 @@ export async function computeWalletPosition({ contractAddress, decimals, walletA
   }
   const balanceUsd = balance * priceUsd;
 
-  const [incoming, outgoing] = await Promise.all([
-    fetchTransfers({ contractAddress, walletAddress, direction: "in", chainKey }),
-    fetchTransfers({ contractAddress, walletAddress, direction: "out", chainKey }),
-  ]);
+  // Cost-basis transfer scan across EVERY read wallet (2026-09-19) — same
+  // rationale as the balance sum: acquisitions/exits via the launchpad hit
+  // the EOA; app-signed trades hit the SCW. Merge both wallets' histories.
+  const transferLists = await Promise.all(
+    wallets.flatMap((w) => [
+      fetchTransfers({ contractAddress, walletAddress: w, direction: "in", chainKey }),
+      fetchTransfers({ contractAddress, walletAddress: w, direction: "out", chainKey }),
+    ])
+  );
+  const seenTxs = new Set();
+  const incoming = [];
+  const outgoing = [];
+  for (const list of transferLists) {
+    for (const t of list) {
+      // dedupe overlapping transfers (a tx between a user's own two wallets
+      // appears in both histories — keep one entry per transfer event)
+      const key = (t.hash + ":" + (t.uniqueId ?? (t.blockNum + ":" + t.rawContract?.address)));
+      if (seenTxs.has(key)) continue;
+      seenTxs.add(key);
+      if (t.to && wallets.some((w) => w.toLowerCase() === String(t.to).toLowerCase())) incoming.push(t);
+      else outgoing.push(t);
+    }
+  }
   const truncated = incoming.length >= MAX_TRANSFERS || outgoing.length >= MAX_TRANSFERS;
   const wethLower = dep.weth.toLowerCase();
 

@@ -251,11 +251,17 @@ export function usdToEth(usd, ethUsd) {
  * Live position for one token: balance + USD value + ETH/USD, shared by the
  * /api/sniper/position endpoint and the P/L card so both always agree.
  */
-export async function getSniperPosition(chainKey, tokenAddress, { walletOverride = null } = {}) {
-  // walletOverride (2026-09-18): per-user read wallet — hosted users' tokens
-  // live in THEIR wallets, not the global env signer's.
-  const address = walletOverride || (await resolveSigner(chainKey)).address;
-  const bal = await getTokenBalance(chainKey, tokenAddress, address);
+export async function getSniperPosition(chainKey, tokenAddress, { walletOverride = null, walletOverrides = null } = {}) {
+  // walletOverride / walletOverrides (2026-09-18/19): per-user read wallets.
+  // Holdings can SPLIT between the SCW (app-signed trades) and the browser
+  // EOA (launchpad/curve buys) — sum every wallet provided.
+  const wallets = walletOverrides ?? (walletOverride ? [walletOverride] : null);
+  const address = wallets?.[0] || (await resolveSigner(chainKey)).address;
+  const balLists = await Promise.all(
+    (wallets ?? [address]).map((w) => getTokenBalance(chainKey, tokenAddress, w))
+  );
+  const summedRaw = balLists.reduce((a, b) => a + BigInt(b.raw), 0n);
+  const bal = { ...balLists[0], raw: summedRaw.toString(), formatted: Number(summedRaw) / 10 ** Number(balLists[0].decimals) };
   const ethUsd = await getEthUsd(chainKey);
   let valueUsd = 0;
   if (bal.formatted > 0) {

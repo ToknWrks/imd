@@ -52,6 +52,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   // their registry SCW / users-table key / connected wallet, never the global
   // env signer (which on hosted shows 0 for everyone).
   let readWallet = null;
+  let readWallets = null; // SCW + browser EOA — launchpad buys land in the EOA
   // NOTE: sessionAddress needs the REQUEST to read the cookie — passing
   // null made it throw, silently skipping per-user resolution and falling
   // back to the global signer (balance 0 for everyone on /sniper).
@@ -62,8 +63,9 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   try {
     uid = sessionAddress ? sessionAddress(req) : null;
     if (uid) {
-      const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
-      readWallet = await resolveUserReadWallet(uid, "ethereum");
+      const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+      readWallets = await resolveUserReadWallets(uid, "ethereum");
+      readWallet = readWallets[0];
     }
   } catch { /* fall through to per-route resolution */ }
   if (url === "/sniper" && method === "GET") {
@@ -306,7 +308,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
     try {
       const { chain, token } = JSON.parse(await readBody());
       const chainKey = chain || "ethereum";
-      json({ ok: true, ...(await getSniperPosition(chainKey, token, { walletOverride: readWallet })) });
+      json({ ok: true, ...(await getSniperPosition(chainKey, token, { walletOverrides: readWallets })) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
   }
@@ -319,7 +321,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      const pos = await getSniperPosition(chainKey, token, { walletOverride: readWallet });
+      const pos = await getSniperPosition(chainKey, token, { walletOverrides: readWallets });
       if (pos.ok === false) { json({ ok: false, error: pos.error }); return true; }
 
       // Ledger stats via the ONE canonical chronological avg-cost function

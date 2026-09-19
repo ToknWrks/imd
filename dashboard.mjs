@@ -228,14 +228,14 @@ async function isSignerConfigured(userId = null) {
 /** Compute and persist a token's wallet-position snapshot (balance, USD value, cost basis). */
 async function computeAndStorePosition(watcher) {
   try {
-    // Read wallet per USER (registry SCW → connected wallet → signer), not
-    // the global trade signer — copilot users hold tokens in wallets the
-    // global signer knows nothing about (2026-09-18 balance fix).
-    const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
-    const readWallet = await resolveUserReadWallet(watcher.user_id, watcher.chain || "ethereum");
+    // Read walletS per USER (SCW + browser EOA, summed) — copilot users hold
+    // launchpad buys in the EOA while app trades land in the SCW; only the
+    // combined view is truthful (2026-09-19).
+    const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+    const readWallets = await resolveUserReadWallets(watcher.user_id, watcher.chain || "ethereum");
     const chainKey = watcher.chain || "ethereum";
     const pos = await computeWalletPosition({
-      contractAddress: watcher.contract_address, decimals: watcher.decimals ?? 18, walletAddress: readWallet, chainKey,
+      contractAddress: watcher.contract_address, decimals: watcher.decimals ?? 18, walletAddresses: readWallets, chainKey,
       poolOverride: watcher.pool_address,
     });
     updateWalletPosition(watcher.id, {
