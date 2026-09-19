@@ -52,11 +52,15 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   // their registry SCW / users-table key / connected wallet, never the global
   // env signer (which on hosted shows 0 for everyone).
   let readWallet = null;
+  // NOTE: sessionAddress needs the REQUEST to read the cookie — passing
+  // null made it throw, silently skipping per-user resolution and falling
+  // back to the global signer (balance 0 for everyone on /sniper).
+  // uid is declared OUTSIDE the try so every route below can use it —
+  // inside the try it died with the block scope (ReferenceError on /sniper,
+  // 2026-09-19: "uid is not defined" at the page render).
+  let uid = null;
   try {
-    // NOTE: sessionAddress needs the REQUEST to read the cookie — passing
-    // null made it throw, silently skipping per-user resolution and falling
-    // back to the global signer (balance 0 for everyone on /sniper).
-    const uid = sessionAddress ? sessionAddress(req) : null;
+    uid = sessionAddress ? sessionAddress(req) : null;
     if (uid) {
       const { resolveUserReadWallet } = await import("./smart-wallet-api.mjs");
       readWallet = await resolveUserReadWallet(uid, "ethereum");
