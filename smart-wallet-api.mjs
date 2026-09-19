@@ -248,9 +248,11 @@ async function ownerBalances(chainKey) {
   };
 }
 
-async function scwBalances(chainKey) {
+async function scwBalances(chainKey, { sessionKey = null } = {}) {
   const dep = getChain(chainKey);
-  const scw = await getSmartAccountClient(chainKey);
+  // Per-user (2026-09-19): resolve with the SESSION USER's key when given —
+  // never the global env AA_SESSION_KEY.
+  const scw = await getSmartAccountClient(chainKey, sessionKey ? { sessionKey } : {});
   const address = getAddress(scw.account.address);
   const pub = await publicClientFor(chainKey);
   const [ethWei, code, dollarRaw] = await Promise.all([
@@ -272,7 +274,7 @@ async function scwBalances(chainKey) {
  * GET /api/smart-wallet/status (query: chain=ethereum|base|robinhood)
  * Returns both sides' balances + deploy state for the two-card UI.
  */
-export async function smartWalletStatus(chainKey = "ethereum", { statusConnectedWallet = null } = {}) {
+export async function smartWalletStatus(chainKey = "ethereum", { statusConnectedWallet = null, sessionAddress: sessionAddrFn = null, req = null } = {}) {
   // The BROWSER's address is authoritative for the left card — it comes fresh
   // with each poll from wallet-connect.js, never from stale .env state.
   if (statusConnectedWallet && /^0x[0-9a-fA-F]{40}$/.test(statusConnectedWallet)) {
@@ -280,9 +282,29 @@ export async function smartWalletStatus(chainKey = "ethereum", { statusConnected
   } else {
     delete process.env.STATUS_CONNECTED_WALLET;
   }
+  // Per-user SCW (2026-09-19): the smart-wallet card must show the SESSION
+  // USER's wallet, never the global env AA_SESSION_KEY (which on hosted
+  // resolves to a legacy burner 0xF4a6… that belongs to nobody — the old code
+  // happily offered a Fund UI into it). Resolve the user's key the same way
+  // trading does; if they have none, report hasSessionKey=false and skip the
+  // SCW read entirely so the UI can show a "generate a session key" prompt.
+  let userSessionKey = null;
+  let hasSessionKey = false;
+  try {
+    const uid = sessionAddrFn && req ? sessionAddrFn(req) : null;
+    if (uid) {
+      userSessionKey = await resolveUserSessionKeyAsync(uid);
+      hasSessionKey = !!userSessionKey;
+    }
+  } catch { /* unauthenticated or resolver error — treated as no key */ }
   const [owner, scw, ethUsd] = await Promise.all([
     ownerBalances(chainKey).catch((e) => ({ error: e.message.slice(0, 120) })),
-    scwBalances(chainKey).catch((e) => ({ error: e.message.slice(0, 120) })),
+    // ONLY read the SCW for the session user's key. No user key → no SCW
+    // card (the UI renders a generate-session-key prompt instead). This also
+    // stops the env AA_SESSION_KEY from leaking into the UI for everyone.
+    hasSessionKey
+      ? scwBalances(chainKey, { sessionKey: userSessionKey }).catch((e) => ({ error: e.message.slice(0, 120) }))
+      : Promise.resolve(null),
     getEthUsdPriceFor(chainKey).catch(() => 0),
   ]);
   const reserve = Number(gasReserveWei(chainKey)) / 1e18;
@@ -290,6 +312,7 @@ export async function smartWalletStatus(chainKey = "ethereum", { statusConnected
     ok: true,
     chain: chainKey,
     ethUsd,
+    hasSessionKey,
     gasReserveEth: reserve,   // kept for compatibility; max-send now computes live
     owner,
     scw,
@@ -307,7 +330,8 @@ export async function smartWalletStatus(chainKey = "ethereum", { statusConnected
   const ownerAddr = owner && /^0x[0-9a-fA-F]{40}$/.test(owner.address || "") ? owner.address : null;
   if (ownerAddr && scw && !scw.error && scw.ethRaw > 0n) {
     try {
-      const scwClient = await getSmartAccountClient(chainKey);
+      // Same per-user key as the balances above (never the env burner).
+      const scwClient = await getSmartAccountClient(chainKey, userSessionKey ? { sessionKey: userSessionKey } : {});
       const built = await scwClient.buildUserOperation({ uo: { target: ownerAddr, data: "0x", value: scw.ethRaw } });
       const gasCost = BigInt(built.preVerificationGas) +
         BigInt(built.verificationGasLimit) * BigInt(built.maxFeePerGas) +

@@ -147,6 +147,22 @@ function _swCopyFallback(text, done) {
 function renderSmartWalletSection(){
   var s=_swState; if(!s)return;
   var scw=s.scw||{}, owner=s.owner||{};
+  // NO SESSION KEY (2026-09-19): never show a smart-wallet card with a
+  // fundable address — the only wallet the server could previously show here
+  // was a global env burner that belongs to nobody. Co-pilot users see an
+  // explicit explanation + path to autonomy instead.
+  if(!s.hasSessionKey){
+    var ethUsd0=s.ethUsd||0;
+    var h0='';
+    h0+='<div class="sw-head">Smart wallet <span class="hint">not set up</span></div>';
+    h0+='<div class="sw-card" style="grid-column:1/-1">';
+    h0+='<p class="hint" style="margin:0 0 0.6rem"><b>You are in Co-pilot mode</b> — every trade waits for your approval in the browser, and your connected wallet (above) signs it. The server holds no keys for you: that is the safest configuration.</p>';
+    h0+='<p class="hint" style="margin:0 0 0.6rem">Want the app to trade automatically (watch dips, buy on schedule without asking)? <b>Generate a session key</b> in <b>Settings \u2192 Signer</b>. That creates YOUR smart wallet \u2014 a new address derived from your personal session key \u2014 which you fund with ETH; the app then trades from it without waiting for you.</p>';
+    h0+='<p class="hint" style="margin:0;color:#e8b661">\u26a0 Only send funds to a smart wallet address shown here AFTER you generate the key \u2014 this screen shows no deposit address until then, on purpose.</p>';
+    h0+='</div>';
+    document.getElementById('smartWalletSection').innerHTML=h0;
+    return;
+  }
   if(scw.error){
     document.getElementById('smartWalletSection').innerHTML =
       '<div class="sw-head">Smart wallet</div><div class="wallet-loading" style="padding:0.75rem 0">'+_we(scw.error)+'</div>';

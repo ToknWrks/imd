@@ -2284,7 +2284,9 @@ const server = createServer(async (req, res) => {
         // sends it with every poll so the left card always matches the header.
         const statusConnectedWallet = requestUrl.searchParams.get("wallet");
         const { smartWalletStatus } = await import("./smart-wallet-api.mjs");
-        return json(await smartWalletStatus(chainKey, { statusConnectedWallet }));
+        // Session context: the smart-wallet card is PER-USER now — the SCW
+        // shown (or the generate-key prompt) belongs to the logged-in user.
+        return json(await smartWalletStatus(chainKey, { statusConnectedWallet, sessionAddress, req }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
     if (url === "/api/smart-wallet/activate" && method === "POST") {
