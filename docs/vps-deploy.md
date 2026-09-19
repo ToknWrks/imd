@@ -1,120 +1,173 @@
-# VPS Deployment — Accumulate (IMD Launchpad Terminal)
+# VPS Deployment — IMD Launchpad Terminal (as-built, 2026-09-19)
 
-How to run accumulate on a VPS alongside the AgentSignal Trader (`/trader`,
-per `trader/docs/vps-trader.md` Phase 3b) without breaking anything.
-
-**Model:** Fast Vault signing (user sets it up in the Settings tab — no key
-file to hand-copy), persistent pm2 processes for the dip-watcher, scoped
-control scripts so accumulate can never touch another app's processes.
+How the app actually runs on the Hetzner VPS at `https://imd.illuminati.co`
+(legacy `imd.zooch.app` still works during transition). Supersedes the
+2026-09-10 vault-only version of this doc — the signer model changed
+2026-09-17 (AA smart account) and the app went multi-user + auth-gated
+2026-09-18/19. The VultiSig vault path (§6) still exists but is legacy,
+deprecated in the UI, and not what hosting runs on today.
 
 ---
 
 ## 0. Threat model — read honestly before trusting this box
 
-The VPS holds the Fast Vault **device share** (`data/vault.vult`) AND its
-password (`.env`). Together those are everything the legitimate signing
-process needs — an attacker with both can impersonate the device and
-VultiServer will co-sign. The 2-of-2 split protects against **VultiServer**
-being malicious or down; it does NOT protect against a full VPS compromise.
+The dashboard is now public (Caddy TLS, real domain) and auth-gated — not
+SSH-tunnel-only like the original plan. Every route requires a wallet
+signature login (`auth.mjs`), so exposure is not "anyone can trade," but a
+full VPS compromise still matters:
 
-What the vault model actually buys you (vs a raw `AGENT_PRIVATE_KEY`):
-
-- **Revocability.** A stolen raw key is gone forever. A stolen device share can
-  be killed by resharing/rotating the vault from another device.
-- **Partial-exfiltration resistance** — the share alone (without
-  `VULTISIG_PASS`) cannot sign. Only true if the password is NOT on the same
-  box; §3 stores it there, so this line is currently aspirational.
-
-What it does NOT buy: prevention. If the host can sign without you, a
-compromised host can lose everything in that wallet. The real bound is
-**operational**: fund the vault wallet with only the active plans' budget + a
-gas float, sweep profits out on a schedule, and monitor balance changes. The
-only architectures that cap the loss on-chain (compromised host ≠ wallet
-drained) are allowance/executor-contract models or ERC-4337 session keys —
-not built here.
-
-The dashboard is bound to localhost and reached via SSH tunnel — it is never
-exposed to the public internet. That reduces the probability of compromise;
-it does not change what a compromise costs.
+- **MASTER_KEY** decrypts every user's secrets (alchemy/session/telegram
+  keys) and every registry session key in `data/connected-wallets.json`. It
+  is the single most sensitive value on the box — equivalent to a seed
+  phrase for every autonomy-mode user's smart wallet.
+- **Autonomy-mode users** have a per-user session key held server-side,
+  encrypted with MASTER_KEY. A host compromise that also gets MASTER_KEY can
+  sign UserOperations as those users, bounded only by each smart wallet's
+  actual balance (no on-chain spend cap yet — Phase 2, see
+  `docs/smart-account-signer.md`).
+- **Co-pilot-mode users** (the DB default for new users, `signer_mode`
+  defaults to `'copilot'`) hold NO key material on the server at all — every
+  trade is an approval modal signed by the user's own browser wallet
+  (connected via the header's Reown AppKit button). This is the strongest
+  custody posture available today; recommend it for anyone who doesn't need
+  unattended trading. Switching to autonomy is a per-user toggle in Settings.
+- **MultiOwner** semantics mean the connected wallet that created a smart
+  account retains on-chain ownership and can recover via `addOwner` even if
+  the session key is lost — but treat MASTER_KEY + the registry as
+  seed-equivalent regardless.
+- The real bound is still operational: fund smart wallets with only the
+  active plans' budget + a gas float, monitor balance changes, back up
+  `data/` (see §5).
 
 ## 1. Prerequisites (VPS)
 
 ```bash
-node -v      # need 22.x — same as the trader
+node -v      # need 22.x
 npm i -g pm2
 ```
 
 Ubuntu/Debian extras: `sudo apt install -y build-essential python3`
-(better-sqlite3 compiles a native module on install).
+(better-sqlite3 compiles a native module on install). Caddy for TLS
+termination in front of pm2's port.
 
-## 2. Install (coexists with the trader)
+## 2. Install
 
 ```bash
-git clone https://github.com/ToknWrks/accumulate ~/accumulate-imd
+git clone https://github.com/ToknWrks/imd ~/accumulate-imd
 cd ~/accumulate-imd
 npm install
 cp .env.example .env
 ```
 
-The two apps are fully isolated — separate dirs, PM2 names, ports, and SQLite
-files (`imd-*` vs `trader*`; 4210 vs 4100). `iml.sh`/`npm run stop` here only
-targets `imd-dashboard`/`imd-watcher` **by name** — never `pm2 stop all`
-(that would kill the trader; this is enforced in `imd.sh`, see its header).
+The box also runs the unrelated `agentsignal` app and (for the sibling fork)
+`/accumulate` on port 4200 — this app is isolated by dir, pm2 process names
+(`imd-*`), and port (4210). Never touch another app's processes or port.
 
-## 3. `.env` — accumulate-specific values
+## 3. `.env` — set BEFORE first boot
 
+```bash
+MASTER_KEY=<long random hex>   # REQUIRED — missing = hard throw on any secret write
+SMART_ACCOUNT_ACTIVE=true      # keep true — see note below; NOT what makes per-user AA work
+ALCHEMY_API_KEY=<key>          # required — WS subscriptions, AA bundler, transfer scans
+ALLOWED_WALLET=0x...           # optional single-wallet pin; else REGISTRATION governs
+REGISTRATION=open              # open | closed
+COPILOT_ACTIVE=false           # legacy global flag; per-user signer_mode toggle lives in Settings
+# OPENAI_API_KEY / UNISWAP_API_KEY / THEGRAPH_API_KEY — optional
+# ALERT_TELEGRAM_BOT_TOKEN / ALERT_TELEGRAM_CHAT_ID — optional
+IMD_DASHBOARD_PORT=4210
 ```
-ALCHEMY_API_KEY=<your key — works for both apps; read-only RPC, safe to share>
-VAULT_ACTIVE=true
-VULT_FILE_PATH=./data/vault.vult
-VULTISIG_PASS=<vault password, if the vault is encrypted>
-# OPENAI_API_KEY / OPENAI_MODEL       — only if you use Zooch reviews
-# UNISWAP_API_KEY / THEGRAPH_API_KEY  — optional evidence sources
-```
 
-Do **not** copy the trader's `.env` and do **not** reuse its vault (see §5).
+`SMART_ACCOUNT_ACTIVE` only gates the legacy **global** signer
+(`resolveSigner()` — dip-watcher's boot-time signer check, and any
+null-`user_id` legacy rows). It has no effect on per-user signing:
+`resolveSignerUser(userId)` (signer.mjs) builds each user's AA signer
+straight from their own registry session key, regardless of this flag. Keep
+it `true` anyway so `dip-watcher.mjs` doesn't refuse to boot for lack of a
+configured system signer.
+
+Do **not** set the legacy `AA_SESSION_KEY` on hosted — it resolves a global
+env wallet that belongs to nobody (deleted from this VPS already). Per-user
+session keys live in the registry, generated automatically per user (see §4).
 
 ## 4. First run
 
 ```bash
 ./imd.sh start
-# → dashboard on :4210, bound to all interfaces — keep the firewall closed to it
-
-# From your laptop:
-ssh -L 4210:localhost:4210 <vps>
-# then open http://localhost:4210
+# → imd-dashboard on :4210 (Caddy proxies imd.illuminati.co → :4210 with TLS)
+# → imd-watcher runs the always-on dip daemon alongside it
 ```
 
-**Vault setup happens in the UI (Settings tab):**
-1. Create a NEW Fast Vault (email-OTP flow) — or import a `.vult` backup made
-   for this deployment.
-2. Confirm the wallet address shown on Settings.
-3. Fund it with the plan budget + gas float only.
+No SSH tunnel needed — the auth gate (wallet-signature login) is what makes
+public exposure safe.
+
+**Default per-user signer UX** — no `.env` editing per user, and (as of
+2026-09-19) no separate login page or separate "connect a smart wallet"
+step: clicking the header's **Connect wallet** button IS signing in.
+
+1. User clicks **Connect wallet** in the header (there is no separate login
+   document — even a signed-out visitor sees the normal app shell with this
+   button; the content area shows a "connect your wallet" prompt until they
+   do). The Reown AppKit modal opens, they pick a wallet, and `personal_sign`
+   a one-time nonce.
+2. On successful verification the server sets the session cookie AND calls
+   `ensureWalletSession()` in the same request: unknown wallet → generates a
+   fresh per-user session key, derives its smart wallet (SCW), records both
+   encrypted in `data/connected-wallets.json`; known wallet → reuses its
+   existing key. There's no separate "connect" click anymore — logging in
+   already proved wallet ownership.
+3. **Settings → Signer** is where the user sees/manages the result: their
+   SCW address, and the `copilot` (default — browser wallet approves every
+   trade, no server key) vs `autonomy` (server signs with their session key)
+   toggle. Nothing here is env-level or operator-configured per user.
 
 ```bash
-# Boot persistence so the watcher survives VPS reboots:
 pm2 save
-pm2 startup   # run the command it prints (sudo)
+pm2 startup   # run the printed command (sudo) — only when BOTH imd-* apps
+              # AND agentsignal's apps are in their intended state; pm2 save
+              # snapshots the whole box's boot list, not just this app's
 ```
 
-## 5. Vault discipline (read before copying any .vult)
+## 5. Backup discipline — `data/` IS the key material
 
-- **One vault share per app, per machine.** Two processes signing with the same
-  device share race each other's MPC sessions (`waitForPeers` stalls — the bug
-  `trader/vultisig-vault.mjs` documents) and race each other's nonces on-chain.
-- Trader and accumulate therefore get **separate Fast Vaults and separate
-  addresses** — per-app blast radius. A compromise of one app's wallet costs
-  only that app's balance; this is the primary loss cap, per §0.
-- The vault file IS a private key split in half. Back up
-  `~/accumulate-imd/data/vault.vult` (and the VPS `.env`) like production
-  secrets — encrypted, off-box.
-- **Optional hardening (password off-box):** leave `VULTISIG_PASS` unset in
-  `.env` and supply the vault password at process start from your secret
-  manager instead (`systemd EnvironmentFile` on a root-only file, or inject at
-  runtime). Then file-theft alone is inert. Costs: restarts need the password
-  available headlessly — decide deliberately, don't half-do it.
+`data/` is gitignored, so a fresh `git clone` on a rebuilt box starts with
+NONE of it. This caused the 2026-09-18 phantom-wallet incident (see
+CLAUDE.md § Key-persistence) — every restart minted new wallets because the
+registry didn't exist. Back up, off-box, on a schedule (Litestream or
+snapshot):
 
-## 6. Operations cheat-sheet
+- `data/connected-wallets.json` — the session-key registry (encrypted at
+  rest with MASTER_KEY; legacy plaintext rows upgrade transparently on read).
+- `data/accumulate.db` — users table (secrets encrypted with MASTER_KEY),
+  all trade/strategy/ledger tables.
+- The `.env` file itself (MASTER_KEY, ALCHEMY_API_KEY, ALLOWED_WALLET).
+
+Losing MASTER_KEY without a backup makes every encrypted secret and
+registry key permanently unreadable — the funds-safety guard in
+`ensureWalletSession()` then **refuses to mint** a replacement wallet over
+an unreadable record rather than silently creating a new one, so recovery
+means restoring the correct MASTER_KEY, not losing funds outright — but only
+if the backup exists.
+
+## 6. Legacy signer paths (not the hosted default)
+
+Two older signer modes still work (env-selected in `signer.mjs`) but are not
+what hosting runs on:
+
+- **Raw private key** (`AGENT_PRIVATE_KEY`) — headless/local only, never put
+  a raw key on a shared, publicly-reachable box.
+- **VultiSig Fast Vault** (`VAULT_ACTIVE=true`, `VULT_FILE_PATH`,
+  `VULTISIG_PASS`) — the original single-user MPC vault model. The vault
+  file is a private key split in half; the VPS holding both the share and
+  the password means a full compromise can still sign (2-of-2 only protects
+  against VultiServer itself being malicious/down). One vault per app per
+  machine — never share a `.vult` across processes (MPC session races).
+  VultiSig's Chain enum has no Robinhood Chain (4663) — Ethereum mainnet
+  only if used.
+
+Prefer the AA smart-account path (§0, §3) for anything hosted today; see
+`docs/smart-account-signer.md` for the full signer history and rationale.
+
+## 7. Operations cheat-sheet
 
 ```bash
 cd ~/accumulate-imd
@@ -125,44 +178,53 @@ cd ~/accumulate-imd
 node --test alpha.test.mjs
 ```
 
-- **Never** `pm2 stop all` / `restart all` on a shared box — that's the whole
-  reason `imd.sh` is scoped (patched 2026-09-16).
-- The watcher holds the Alchemy **WebSocket** for dip detection; scheduled
-  plan buys are pure HTTP/RPC and self-heal after restarts either way.
-- After editing `dashboard.mjs` or any module, `./imd.sh restart` — the ESM
-  module graph is cached at boot (live-reload does not exist).
+- **Never** `pm2 stop all` / `restart all` / `start all` on this shared box
+  — it registers/snapshots agentsignal's apps too, and a later `pm2 save`
+  can drop an app off the boot list. Restart by exact name only.
+- `hostname` before anything destructive: `AgentSignal1` = the VPS,
+  anything else = local — local and VPS pm2 are unrelated worlds.
+- The watcher holds the Alchemy **WebSocket** for dip detection (with a
+  watchdog now — see `ws-watchdog.mjs`); scheduled plan buys are pure
+  HTTP/RPC and self-heal after restarts either way.
+- After editing any module, `./imd.sh restart` — the ESM module graph is
+  cached at boot (no live-reload).
 
-## 7. Health checks
+## 8. Health checks
 
 ```bash
 pm2 status imd-dashboard imd-watcher      # both "online"
-curl -s localhost:4210/api/wallet | head -c 200    # signer resolves
-tail -f ~/.pm2/logs/imd-watcher-out.log    # swap-event ticks
+curl -sI https://imd.illuminati.co        # 200/302 through Caddy, TLS valid
+tail -f ~/.pm2/logs/imd-watcher-out.log   # swap-event ticks
 ```
 
+Restart checklist after any redeploy (from CLAUDE.md — repeat here because
+it's the fastest way to catch a regression): log in (header Connect wallet
+button — this is the whole flow now) → same SCW address as before
+(phantom-wallet canary) → one test buy dry-run →
+`POST /api/gas/backfill` if new trades landed.
+
 Known failure signatures:
-- `VultiServer unreachable` / keysign timeouts → vault co-sign down; the trader
-  halts on this (circuit breaker, Phase 3). Accumulate does NOT yet — treat
-  this as the first port from the trader codebase if errors appear.
-- `ROBINHOOD_MAINNET is not enabled` — stale Alchemy entitlement noise; ignore
-  unless you're using chain 4663 (not supported on vault signing anyway).
-- Watcher silent for hours with an active plan → check
-  `pm2 logs imd-watcher --err --lines 50` for WS drop messages (the watcher
-  has no auto-reconnect yet — see Risks in CLAUDE.md).
 
-## 8. What is intentionally NOT supported on the VPS
+- `refusing to mint a new wallet — funds-safety guard` → the registry
+  record for that address exists but its key is unreadable (MASTER_KEY
+  mismatch, or corrupted `data/connected-wallets.json`). Restore the
+  correct MASTER_KEY / backup rather than deleting the record.
+- Watcher silent for a while with an active plan → check
+  `pm2 logs imd-watcher --err --lines 50` for WS stall/rebuild messages
+  (the watchdog should auto-rebuild; a persistent stall past that means the
+  Alchemy WS entitlement or network path is down).
+- `ROBINHOOD_MAINNET is not enabled` — stale Alchemy entitlement noise;
+  ignore unless actively using chain 4663.
 
-- **Robinhood Chain (4663)** — VultiSig's Chain enum has no 4663, so vault
-  signing can't sign there. Ethereum mainnet only, which is what this
-  deployment targets.
-- **Base sniper** — vault signing is Ethereum-only today (`.env.example`).
-  Keep the raw-key path off the VPS.
-- **MM watcher** — mainnet-only build; `pm2 delete accumulate-mm-watcher` is
-  a different app's business, not this one's.
+## 9. What is intentionally NOT supported / still open
 
-## 9. Multi-tenant future (not now)
-
-Same open questions as `trader/docs/vps-trader.md`: one process per user vs
-shared loop, per-user Postgres, in-UI vault-share onboarding, failure
-visibility, pricing. Nothing in this runbook blocks that path — the vault
-model carries over verbatim.
+- **No arbitrary-ERC20 move-out UI** — the wallet slideout moves ETH/dollar
+  only. Don't let meaningful token balances sit in a smart wallet yet.
+- **`mm_trades` / `sniper_autosells` have no `user_id`** — their gas lands
+  in the NULL-owner legacy bucket.
+- **Gas backfill is manual** — schedule `POST /api/gas/backfill` or run it
+  after trade activity.
+- **On-chain session-key spend caps** are not installed — autonomy-mode
+  custody is bounded by funding discipline, not a contract-enforced cap
+  (Phase 2 in `docs/smart-account-signer.md`).
+- Full list of hosting/multi-tenant gaps: `HOSTED_PLAN.md`.

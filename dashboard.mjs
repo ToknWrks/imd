@@ -211,11 +211,13 @@ function watcherOwnershipError(req, watcherId) {
 
 // ── Pages ─────────────────────────────────────────────────────────────────────
 
-async function isSignerConfigured() {
-  // Phase 2 hosted: a CONNECTED WALLET (address-only, header Connect button) is
-  // a fully valid read-context — the "no wallet configured" error should not
-  // appear on /tokens just because there's no legacy env signer.
-  if (getEnvValue("CONNECTED_WALLET")?.trim()) return true;
+async function isSignerConfigured(userId = null) {
+  // Hosted multi-user (2026-09-19): logging in IS connecting a wallet now — a
+  // signed-in user always has a valid read context (their own address in
+  // co-pilot mode, or their session-key SCW in autonomy mode), regardless of
+  // any legacy env-level signer. Only fall through to the env checks below
+  // for anonymous/system calls.
+  if (userId) return true;
   if (getEnvValue("VAULT_ACTIVE") === "true") {
     const status = await vaultStatus(getEnvValue("VULTISIG_PASS")).catch(() => ({ exists: false }));
     return !!(status.exists && status.address && status.isDeviceShare !== false);
@@ -262,7 +264,7 @@ function computeWalletSummary(watchers) {
 
 async function watchersPage(error = "", planWatcherId = null, userId = null) {
   const watchers = getDipWatchers(userId);
-  const signerConfigured = await isSignerConfigured();
+  const signerConfigured = await isSignerConfigured(userId);
   const summary = signerConfigured ? computeWalletSummary(watchers) : null;
   // When ?plan=<watcherId> is present (sniper → Accumulate migration), render a
   // hidden data-carrying button for that watcher and auto-click it on load —
@@ -894,7 +896,7 @@ async function tokenDetailPage(watcherId, userId = null) {
   if (userId && w.user_id && w.user_id !== userId) return null; // isolation: another user's token
   const strategy = getAccumulationStrategy(w.id);
   const trades = getDipTrades(w.id, 15);
-  const signerConfigured = await isSignerConfigured();
+  const signerConfigured = await isSignerConfigured(userId);
   let market = null, tech = null, impact = null;
   const chainKey = w.chain || "ethereum";
   try { market = (await getMarketOverview(w.contract_address, chainKey))[0] ?? null; } catch {}
@@ -1017,7 +1019,7 @@ async function settingsPage(vaultMsg = "", userId = null) {
   // Smart-account mode state: session key presence + derived SCW address.
   const smartActive = getEnvValue("SMART_ACCOUNT_ACTIVE") === "true";
   const copilotOn = isCopilotActive();
-  const copilotConnected = getEnvValue("CONNECTED_WALLET");
+  const copilotConnected = userId; // your own login address IS the co-pilot wallet now
   // Per-user signer state (Phase 2): mode + key presence from the users table.
   let userMode = "copilot";
   let userHasSessionKey = false;
@@ -1746,7 +1748,7 @@ const server = createServer(async (req, res) => {
     // SIWE-style: connect + sign a one-time nonce; HMAC cookie session.
     // Handles /api/auth/* itself; serves the login page or 401s APIs when
     // unauthenticated. Returns false to proceed with normal routing.
-    if (await handleAuth(req, res, { url, method, readBody, json, send })) return;
+    if (await handleAuth(req, res, { url, method, readBody, json, send, shell })) return;
 
     if (url === "/" || url === "") return redirect("/overview");
     if (url === "/overview" && method === "GET") return send(await overviewPage(sessionAddress(req)));
@@ -1859,8 +1861,7 @@ const server = createServer(async (req, res) => {
         const { active } = JSON.parse(await readBody());
         if (typeof active !== "boolean") return json({ ok: false, error: "active (boolean) required" });
         if (active) {
-          const connected = getEnvValue("CONNECTED_WALLET");
-          if (!connected) return json({ ok: false, error: "Connect a wallet in the header first — co-pilot signs with the browser wallet" });
+          if (!sessionAddress(req)) return json({ ok: false, error: "sign in with your wallet first — co-pilot signs with the browser wallet" });
         }
         writeEnvValues({ COPILOT_ACTIVE: active ? "true" : "false" });
         if (!active) {
@@ -2046,7 +2047,7 @@ const server = createServer(async (req, res) => {
       if (!watcher) return json({ ok: false, error: "token not found" });
       let amt = NaN; // hoisted so the catch block can persist the error row
       try {
-        if (!(await isSignerConfigured())) return json({ ok: false, error: "no wallet configured — set one in Settings" });
+        if (!(await isSignerConfigured(sessionAddress(req)))) return json({ ok: false, error: "no wallet configured — set one in Settings" });
         const { amount, slippagePct } = JSON.parse(await readBody());
         amt = Number(amount);
         if (!(amt > 0)) return json({ ok: false, error: "amount must be a positive number" });
@@ -2251,45 +2252,28 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/api/wallet" && method === "GET") {
-      return await walletApiHandler({ isSignerConfigured, json });
+      return await walletApiHandler({ isSignerConfigured, json, userId: sessionAddress(req) });
     }
 
-    // Header wallet-connect: address-only session (no key material ever).
-    if (url === "/api/wallet-connect" && method === "GET") {
-      const { getConnectedWallet } = await import("./wallet-connect-store.mjs");
-      return json({ ok: true, address: getConnectedWallet() });
-    }
-    if (url === "/api/wallet-connect" && method === "POST") {
-      try {
-        const { address } = JSON.parse(await readBody() || "{}");
-        if (address && !/^0x[0-9a-fA-F]{40}$/.test(address)) return json({ ok: false, error: "invalid address" });
-        const { setConnectedWallet } = await import("./wallet-connect-store.mjs");
-        setConnectedWallet(address || null);
-        // Per-connected-wallet smart wallet (Option 1): on connect, ensure this
-        // wallet has its own session key + SCW, and make it the active signer.
-        // On disconnect, leave the record (funds stay with the account).
-        let sw = null;
-        if (address) {
-          try {
-            const { ensureWalletSession } = await import("./smart-wallet-api.mjs");
-            sw = await ensureWalletSession(address, "ethereum");
-          } catch (e) { console.error("[wallet-connect] session ensure failed:", e.message); }
-        }
-        return json({ ok: true, address: address || null, smartWallet: sw });
-      } catch (e) { return json({ ok: false, error: e.message }); }
+    // Echoes the caller's OWN authenticated identity (from the session cookie)
+    // — never a shared/global value. Replaces the old /api/wallet-connect GET,
+    // which read a single .env CONNECTED_WALLET line shared by every user
+    // (the 2026-09-19 "everyone sees the same wallet" bug). Header JS uses
+    // this to restore the button label on load without a separate connect step.
+    if (url === "/api/session" && method === "GET") {
+      return json({ ok: true, address: sessionAddress(req) });
     }
 
     // Smart-wallet transfer UI (two-card owner↔SCW view in the wallet slideout)
     if (url === "/api/smart-wallet/status" && method === "GET") {
       try {
         const chainKey = requestUrl.searchParams.get("chain") || "ethereum";
-        // The browser's connected address is authoritative — wallet-connect.js
-        // sends it with every poll so the left card always matches the header.
-        const statusConnectedWallet = requestUrl.searchParams.get("wallet");
         const { smartWalletStatus } = await import("./smart-wallet-api.mjs");
-        // Session context: the smart-wallet card is PER-USER now — the SCW
-        // shown (or the generate-key prompt) belongs to the logged-in user.
-        return json(await smartWalletStatus(chainKey, { statusConnectedWallet, sessionAddress, req }));
+        // Session context: both cards are PER-USER now — the owner address AND
+        // the SCW (or the generate-key prompt) belong to the logged-in user.
+        // No client-submitted address anymore (that was a second copy of the
+        // same "which wallet" question, answerable only from the cookie).
+        return json(await smartWalletStatus(chainKey, { sessionAddress, req }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
     if (url === "/api/smart-wallet/activate" && method === "POST") {

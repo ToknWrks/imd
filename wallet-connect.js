@@ -1,33 +1,25 @@
 /**
- * wallet-connect.js — header "Connect wallet" button + EIP-1193 browser-wallet
- * session. This is the host-deployment path to a fully in-browser ownership
- * model: the user connects MetaMask/Rabby/etc from the header, that address
- * becomes the app's owner/connected wallet, and the AA session key signs
- * trades server-side.
+ * wallet-connect.js — header "Connect wallet" button = the ENTIRE sign-in
+ * flow (2026-09-19). There is no separate login page/gate anymore: clicking
+ * this button connects a wallet (window.ethereum, or the Reown AppKit modal
+ * when window.appKitConnect is available) and immediately signs the login
+ * nonce with it. A successful signature both proves ownership AND becomes
+ * the session — identity = wallet address (auth.mjs).
  *
  * This file ships BOTH:
- *   - WALLET_CONNECT_BUTTON: header button markup (shows address when connected)
+ *   - WALLET_CONNECT_BUTTON: header button markup (shows address when signed in)
  *   - WALLET_CONNECT_JS: inline script (EIP-1193 — window.ethereum, zero deps)
  *
- * The connected address is persisted server-side via /api/wallet-connect
- * (POST connect/disconnect) so the backend can resolve "the user's wallet"
- * for reads (balances, positions) without any key material — the KEY never
- * leaves the browser extension; only the ADDRESS is shared with the server.
- *
- * Migration note (2026-09-17): this is step 1 of removing VAULT_ACTIVE /
- * AGENT_PRIVATE_KEY as signer options. Phase order:
- *   1. Connect wallet (address only, read-only balances)      ← this file
- *   2. Fund SCW from the connected wallet (browser signs the transfer)
- *   3. Smart wallet (AA_SESSION_KEY) signs all app trades — server-side
- *   4. Owner signing moves fully client-side; server holds NO user key.
+ * The key never leaves the browser extension; only the ADDRESS + a SIGNATURE
+ * of a one-time server nonce are ever sent to the server.
  */
 export const WALLET_CONNECT_BUTTON = `
 <span id="walletConnectArea">
-  <button id="walletConnectBtn" class="wallet-connect-btn" onclick="wcToggleConnect()" title="Connect your wallet (address only — keys stay in your wallet)">Connect wallet</button>
+  <button id="walletConnectBtn" class="wallet-connect-btn" onclick="wcToggleConnect()" title="Connect your wallet and sign in">Connect wallet</button>
 </span>`;
 
 export const WALLET_CONNECT_JS = /* js */`
-// ── Header wallet-connect (EIP-1193, no dependencies) ──────────────────────
+// ── Header wallet-connect = sign-in (EIP-1193, no dependencies) ────────────
 var _wcAddress = null;
 
 function _wcBtnLabel() {
@@ -35,70 +27,88 @@ function _wcBtnLabel() {
   if (!b) return;
   b.textContent = _wcAddress ? _wcAddress.slice(0, 6) + '\\u2026' + _wcAddress.slice(-4) : 'Connect wallet';
   b.classList.toggle('connected', Boolean(_wcAddress));
-  b.title = _wcAddress ? 'Connected — click to disconnect' : 'Connect your wallet (address only — keys never leave your wallet)';
+  b.title = _wcAddress ? 'Signed in — click to sign out' : 'Connect your wallet and sign in';
 }
 
 async function wcToggleConnect() {
   if (_wcAddress) return wcDisconnect();
-  // Phase 2: prefer the Reown AppKit universal modal (any wallet — injected,
-  // WalletConnect QR, 300+) when the platform script has initialized it.
-  if (window.appKitConnect) {
-    try {
+  var btn = document.getElementById('walletConnectBtn');
+  var origLabel = btn ? btn.textContent : '';
+  try {
+    var address, provider;
+    // Prefer the Reown AppKit universal modal (any wallet — injected,
+    // WalletConnect QR, 300+) when the platform script has initialized it.
+    if (window.appKitConnect) {
       var res = await window.appKitConnect();
       if (!res || !res.address) return;
-      _wcAddress = res.address;
-      _wcBtnLabel();
-      await fetch('/api/wallet-connect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ address: _wcAddress }) });
-      openWallet();
+      address = res.address;
+      provider = res.provider;
+    } else if (window.ethereum) {
+      var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts || !accounts.length) return;
+      address = accounts[0];
+      provider = window.ethereum;
+    } else {
+      alert('No browser wallet found. Install MetaMask, Rabby, or another EIP-1193 wallet.');
       return;
-    } catch (e) {
-      if (e && e.code === 4001) return;
-      // fall through to injected-only below
     }
-  }
-  if (!window.ethereum) { alert('No browser wallet found. Install MetaMask, Rabby, or another EIP-1193 wallet.'); return; }
-  try {
-    var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    if (!accounts || !accounts.length) return;
-    _wcAddress = accounts[0];
-    _wcBtnLabel();
-    // Persist the address server-side (read-only context — no key material).
-    await fetch('/api/wallet-connect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ address: _wcAddress }) });
-    openWallet();
+    if (!provider || !provider.request) throw new Error('wallet provider unavailable — try an injected wallet');
+
+    if (btn) { btn.disabled = true; btn.textContent = 'Waiting for signature\\u2026'; }
+    var nres = await fetch('/api/auth/nonce');
+    var nj = await nres.json();
+    if (!nj.ok) throw new Error(nj.error || 'nonce failed');
+
+    // Guard against a half-torn-down provider whose personal_sign never
+    // settles (the "infinite spin" lesson) — surface a retry instead of
+    // hanging until the wallet's own timeout, if any.
+    var signature = await Promise.race([
+      provider.request({ method: 'personal_sign', params: [nj.message, address] }),
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('signature request stalled — click Connect wallet again')); }, 45000);
+      }),
+    ]);
+
+    if (btn) btn.textContent = 'Verifying\\u2026';
+    var vres = await fetch('/api/auth/verify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address: address, signature: signature, nonce: nj.nonce }),
+    });
+    var vj = await vres.json();
+    if (!vj.ok) throw new Error(vj.error || 'verification failed');
+    location.reload();
   } catch (e) {
-    if (e && e.code === 4001) return; // user rejected
-    alert('Wallet connect failed: ' + (e.message || e));
+    if (btn) { btn.disabled = false; btn.textContent = origLabel || 'Connect wallet'; }
+    if (e && e.code === 4001) return; // user rejected in wallet
+    alert('Sign-in failed: ' + (e.message || e));
   }
 }
 
 async function wcDisconnect() {
   _wcAddress = null;
   _wcBtnLabel();
-  // FULL LOGOUT (2026-09-19): disconnecting the wallet must also end the
-  // server SESSION — the auth gate means no session = every page is the
-  // connect-wallet gate. The old code only cleared the address record and
-  // left the user "logged in" with nothing connected (the broken logout).
-  // Also clear AppKit's cached connection so the next login picks a fresh
-  // account instead of silently reusing the old one.
+  // FULL LOGOUT: signing out must end the server SESSION — the auth gate
+  // means no session = every page shows the connect prompt.
   try { await fetch('/auth/logout', { method: 'POST' }); } catch {}
   try { if (window.appKitModal?.disconnect) await window.appKitModal.disconnect(); } catch {}
   try { localStorage.removeItem('@appkit/connection'); localStorage.removeItem('@w3m/connected'); localStorage.removeItem('wagmi.connected'); localStorage.removeItem('wagmi.wallet'); } catch {}
   location.href = '/';
 }
 
-// Restore a prior connection on load (address only — never re-requests access).
+// Restore the header label from the current session (never a shared/global
+// value — this is the caller's OWN authenticated identity, from the cookie).
 (async function wcRestore() {
   try {
-    var r = await fetch('/api/wallet-connect');
+    var r = await fetch('/api/session');
     var j = await r.json();
     if (j.ok && j.address) { _wcAddress = j.address; _wcBtnLabel(); }
   } catch {}
   if (window.ethereum && _wcAddress) {
-    // If the wallet is still connected, keep the address in sync on account change.
-    window.ethereum.on && window.ethereum.on('accountsChanged', function(accs) {
-      _wcAddress = (accs && accs[0]) || null;
-      _wcBtnLabel();
-      if (!_wcAddress) wcDisconnect();
+    // If the wallet disconnects/switches accounts client-side, end the
+    // session too rather than silently keep showing stale balances.
+    window.ethereum.on && window.ethereum.on('accountsChanged', function (accs) {
+      var next = (accs && accs[0]) || null;
+      if (!next || next.toLowerCase() !== (_wcAddress || '').toLowerCase()) wcDisconnect();
     });
   }
 })();

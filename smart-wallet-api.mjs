@@ -160,13 +160,15 @@ export async function resolveUserReadWallet(userId, chainKey = "ethereum") {
       }
     } catch { /* fall through */ }
   }
-  // 3. The connected browser wallet address itself (copilot read-context —
-  //    tokens bought from the browser wallet show up here).
-  try {
-    const { getConnectedWallet } = await import("./wallet-connect-store.mjs");
-    const cw = getConnectedWallet();
-    if (cw) return cw;
-  } catch { /* fall through */ }
+  // 3. The user's own login address (co-pilot read-context — identity IS the
+  //    wallet address post-auth-gate; tokens bought from the browser wallet
+  //    show up here). Previously this read a single GLOBAL .env
+  //    CONNECTED_WALLET value shared by every user on the box — whichever
+  //    user last clicked "Connect wallet" anywhere clobbered it for everyone
+  //    (the 2026-09-19 "every co-pilot user sees the same balances" bug).
+  //    userId here already IS that address (see the regex-checked branch
+  //    above), so just use it.
+  if (userId && /^0x[0-9a-fA-F]{40}$/.test(userId)) return getAddress(userId);
   // 4. Global signer fallback (local dev / legacy).
   const { resolveSigner } = await import("./signer.mjs");
   return (await resolveSigner(chainKey)).address;
@@ -187,12 +189,12 @@ async function pub_getBalance(pub, addr) {
 }
 
 /**
- * The CONNECTED wallet — the one shown in the slideout's left card and the one
+ * The OWNER wallet — the one shown in the slideout's left card and the one
  * the user thinks of as "my wallet" (VultiSig vault locally, raw key on a VPS,
- * browser wallet on a hosted deployment later). Always resolved WITHOUT the AA
- * branch, regardless of the current SMART_ACCOUNT_ACTIVE mode: the two-card
- * view compares the connected wallet against the smart wallet, and when AA is
- * the ACTIVE trading signer the two would otherwise be the same address.
+ * the LOGGED-IN wallet on hosted). Always resolved WITHOUT the AA branch,
+ * regardless of the current SMART_ACCOUNT_ACTIVE mode: the two-card view
+ * compares the owner wallet against the smart wallet, and when AA is the
+ * ACTIVE trading signer the two would otherwise be the same address.
  */
 async function resolveOwnerSigner(chainKey) {
   const prev = process.env.SMART_ACCOUNT_ACTIVE;
@@ -208,17 +210,19 @@ async function resolveOwnerSigner(chainKey) {
   }
 }
 
-async function ownerBalances(chainKey) {
+async function ownerBalances(chainKey, sessionOwnerAddress = null) {
   const dep = getChain(chainKey);
-  // PREFER the actually-connected browser wallet (header session) over the
-  // legacy signer — this is "the user's wallet" in the connect-wallet model.
-  // Stale .env CONNECTED_WALLET values are the server's best guess; the BROWSER
-  // always sends the authoritative address with each status poll.
+  // PREFER the logged-in wallet's own address — that's "the user's wallet"
+  // now that login IS the connect step. Passed in directly from the request's
+  // session (never from process.env: a previous version stashed the client's
+  // submitted address in a process-global for the duration of the request,
+  // which is a race under concurrent requests from different users — request
+  // B could overwrite the value before request A read it back).
   let address = null;
   let kind = "signer";
-  if (process.env.STATUS_CONNECTED_WALLET) {
-    address = process.env.STATUS_CONNECTED_WALLET;
-    kind = "browser";
+  if (sessionOwnerAddress) {
+    address = sessionOwnerAddress;
+    kind = "session";
   } else {
     const owner = await resolveOwnerSigner(chainKey);
     address = owner.address;
@@ -274,31 +278,26 @@ async function scwBalances(chainKey, { sessionKey = null } = {}) {
  * GET /api/smart-wallet/status (query: chain=ethereum|base|robinhood)
  * Returns both sides' balances + deploy state for the two-card UI.
  */
-export async function smartWalletStatus(chainKey = "ethereum", { statusConnectedWallet = null, sessionAddress: sessionAddrFn = null, req = null } = {}) {
-  // The BROWSER's address is authoritative for the left card — it comes fresh
-  // with each poll from wallet-connect.js, never from stale .env state.
-  if (statusConnectedWallet && /^0x[0-9a-fA-F]{40}$/.test(statusConnectedWallet)) {
-    process.env.STATUS_CONNECTED_WALLET = statusConnectedWallet;
-  } else {
-    delete process.env.STATUS_CONNECTED_WALLET;
-  }
+export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress: sessionAddrFn = null, req = null } = {}) {
   // Per-user SCW (2026-09-19): the smart-wallet card must show the SESSION
   // USER's wallet, never the global env AA_SESSION_KEY (which on hosted
   // resolves to a legacy burner 0xF4a6… that belongs to nobody — the old code
   // happily offered a Fund UI into it). Resolve the user's key the same way
   // trading does; if they have none, report hasSessionKey=false and skip the
   // SCW read entirely so the UI can show a "generate a session key" prompt.
+  // Same `uid` also drives the owner card below — one source of truth
+  // (the signed session), not a client-submitted address.
+  const uid = sessionAddrFn && req ? sessionAddrFn(req) : null;
   let userSessionKey = null;
   let hasSessionKey = false;
   try {
-    const uid = sessionAddrFn && req ? sessionAddrFn(req) : null;
     if (uid) {
       userSessionKey = await resolveUserSessionKeyAsync(uid);
       hasSessionKey = !!userSessionKey;
     }
   } catch { /* unauthenticated or resolver error — treated as no key */ }
   const [owner, scw, ethUsd] = await Promise.all([
-    ownerBalances(chainKey).catch((e) => ({ error: e.message.slice(0, 120) })),
+    ownerBalances(chainKey, uid).catch((e) => ({ error: e.message.slice(0, 120) })),
     // ONLY read the SCW for the session user's key. No user key → no SCW
     // card (the UI renders a generate-session-key prompt instead). This also
     // stops the env AA_SESSION_KEY from leaking into the UI for everyone.

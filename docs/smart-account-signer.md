@@ -118,7 +118,9 @@ pass succeeds.
    Verify: inner tx hash lands in `dip_trades`, receipt interop with
    `assertTxSucceeded`, gas ledger records the UO's inner tx.
 4. Interface shim already built and unit-path tested; `wallet-api.mjs` reads
-   now prefer CONNECTED_WALLET (✅ 2026-09-17).
+   now prefer the logged-in session's own address (✅ 2026-09-17, updated
+   2026-09-19 when the global `CONNECTED_WALLET` store it originally used
+   was removed in favor of per-request session identity).
 5. Settings-tab visibility — done (SCW address + session key UI).
 6. Only then: Phase 2 session-key policy module on-chain.
 

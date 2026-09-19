@@ -2,16 +2,15 @@
  * wallet-api.mjs — GET /api/wallet handler.
  * Multi-chain ETH + dollar-token balances for the wallet slideout.
  *
- * Balance source (2026-09-17 wallet-connect migration): the CONNECTED wallet
- * (header session, CONNECTED_WALLET env) when set — that's "the user's wallet"
- * in the connect-wallet model. Falls back to the configured signer (legacy
- * vault/raw key) when no browser wallet is connected, preserving headless
- * behavior.
+ * Balance source (2026-09-19 — post auth-gate): the LOGGED-IN user's own
+ * address — identity = wallet address (auth.mjs), so no separate "connected
+ * wallet" concept exists anymore. Falls back to the configured signer
+ * (legacy vault/raw key) only for anonymous/system calls, preserving
+ * headless behavior.
  */
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
 import { getErc20Balance } from "./dip-swap.mjs";
 import { getDipWatchers } from "./db.mjs";
-import { getConnectedWallet } from "./wallet-connect-store.mjs";
 import { createPublicClient, http } from "viem";
 
 /** Chain display metadata — names, colors, initials, dollar-token symbols. */
@@ -28,17 +27,17 @@ const CHAIN_META = CHAIN_KEYS.map((k) => {
 
 /**
  * @param {object} opts
- * @param {() => Promise<boolean>} opts.isSignerConfigured
+ * @param {(userId?: string|null) => Promise<boolean>} opts.isSignerConfigured
  * @param {(data: any, status?: number) => void} opts.json
+ * @param {string|null} opts.userId - the authenticated session address, or null
  */
-export async function walletApiHandler({ isSignerConfigured, json }) {
+export async function walletApiHandler({ isSignerConfigured, json, userId = null }) {
   try {
-    // The connected (browser) wallet takes precedence; the configured signer is
-    // the legacy fallback. Balances are READ-ONLY for the connected wallet —
-    // the address is all the server knows.
-    const connected = getConnectedWallet();
-    const readAddress = connected || null;   // null → per-chain signer below
-    if (!connected && !(await isSignerConfigured())) {
+    // The logged-in user's own address takes precedence; the configured signer
+    // is the legacy fallback for anonymous/system calls. Balances are
+    // READ-ONLY for that address — no key material involved.
+    const readAddress = userId || null;   // null → per-chain signer below
+    if (!readAddress && !(await isSignerConfigured(userId))) {
       return json({ ok: false, error: "no wallet connected" });
     }
 
@@ -90,7 +89,7 @@ export async function walletApiHandler({ isSignerConfigured, json }) {
     // Watched tokens from the /tokens table — position snapshots (balance,
     // USD value, price) are persisted by computeWalletPosition() and refreshed
     // by the watcher/dashboard, so reading them here costs no RPC calls.
-    const tokens = getDipWatchers()
+    const tokens = getDipWatchers(userId)
       .filter((w) => w.wallet_balance != null)
       .map((w) => ({
         symbol: w.symbol,
@@ -109,7 +108,7 @@ export async function walletApiHandler({ isSignerConfigured, json }) {
     return json({
       ok: true,
       walletAddress: readAddress || undefined,     // the wallet these balances describe
-      walletSource: connected ? "connected" : "signer",
+      walletSource: readAddress ? "session" : "signer",
       eth: { total: ethTotal, totalUsd: ethTotalUsd, chains: ethChains },
       usd: { totalUsd: usdTotalUsd, symbol: usdChains.some(c => c.symbol === "USDG") ? "USD" : "USDC", chains: usdChains },
       tokens,

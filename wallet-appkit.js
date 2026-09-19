@@ -36,14 +36,19 @@ export function APPKIT_SCRIPT(projectId, rpcUrl) {
 
   window.appKitConnect = async function appKitConnect() {
     modal.open();
-    // Check current state first (pre-connected wallets don't re-fire the state subscription)
-    const getAddr = () => modal.getAddress?.() || modal.getState?.()?.address;
+    // Check current state first (pre-connected wallets don't re-fire the account subscription).
+    // NOTE: subscribeState() reports PublicStateControllerState (open/loading/network) —
+    // it never carries .address. subscribeAccount() is the one that fires with the
+    // connected address (UseAppKitAccountReturn). Using subscribeState here silently
+    // never resolves on a fresh connect (2026-09-19 lesson: only the immediate
+    // getAddress() check ever worked, which is why a fresh sign-in hung until a
+    // page refresh let AppKit's own cache satisfy that immediate check instead).
     const address = await new Promise((resolve, reject) => {
-      const immediate = getAddr();
+      const immediate = modal.getAddress?.();
       if (immediate) { resolve(immediate); return; }
       const timeout = setTimeout(() => reject(new Error('No wallet connected within 120s')), 120000);
-      const unsub = modal.subscribeState((state) => {
-        if (state.address) { unsub(); clearTimeout(timeout); resolve(state.address); }
+      const unsub = modal.subscribeAccount((state) => {
+        if (state?.address) { unsub(); clearTimeout(timeout); resolve(state.address); }
       });
     });
     const provider = modal.getWalletProvider?.();

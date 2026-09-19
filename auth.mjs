@@ -204,6 +204,15 @@ export async function verifyLogin({ address, signature, nonce }, req) {
   }
   _verifyAttempts.delete(ipOf(req));
   console.log(`[auth] ✅ wallet ${addr.slice(0, 6)}…${addr.slice(-4)} signed in${user.is_admin ? " (admin)" : ""}`);
+  // Ensure this wallet's per-user session key + smart wallet exist (Option 1,
+  // 2026-09-18): login IS the connect action now — there is no separate
+  // "Connect wallet" step, so this is the one place that must call it.
+  // Best-effort: a failure here must not block sign-in (co-pilot users never
+  // need a session key at all).
+  try {
+    const { ensureWalletSession } = await import("./smart-wallet-api.mjs");
+    await ensureWalletSession(addr, "ethereum");
+  } catch (e) { console.error(`[auth] wallet session ensure failed for ${addr.slice(0, 6)}…${addr.slice(-4)}:`, e.message); }
   return { ok: true, address: addr };
 }
 
@@ -211,63 +220,26 @@ function registrationMode() {
   return (process.env.REGISTRATION || envValue("REGISTRATION") || "open").toLowerCase() === "closed" ? "closed" : "open";
 }
 
-// ── Login page (served to unauthenticated browser requests) ──────────────────
-const LOGIN_PAGE_HTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accumulate — Sign in</title>
-<style>
-  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-         background:#0d0f12; color:#fafafa; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
-  .box { width:min(380px, 92vw); background:#16181d; border:1px solid rgba(232,182,97,0.35); border-radius:10px; padding:1.6rem; text-align:center; }
-  h1 { font-size:1.15rem; margin:0 0 0.3rem; }
-  h1 span { color:#e8b661; }
-  p.hint { color:#9aa0a6; font-size:0.8rem; margin:0 0 1.1rem; line-height:1.5; }
-  button { width:100%; padding:0.65rem; background:#e8b661; color:#16181d; font-weight:700;
-           border:none; border-radius:6px; cursor:pointer; font-size:0.95rem; }
-  button:disabled { opacity:0.5; cursor:wait; }
-  .err { color:#f87171; font-size:0.82rem; margin-top:0.7rem; min-height:1.1rem; line-height:1.4; }
-</style></head>
-<body><div class="box">
-  <h1>Accumulate<span>IMD</span></h1>
-  <p class="hint">Connect your wallet and sign the login message to continue.<br>The signature proves ownership only — it never moves funds.</p>
-  <button id="btn" onclick="walletLogin()">Connect wallet &amp; sign in</button>
-  <div class="err" id="err"></div>
-</div>
-<script>
-async function walletLogin() {
-  const btn = document.getElementById('btn'), err = document.getElementById('err');
-  err.textContent = '';
-  if (!window.ethereum) { err.textContent = 'No browser wallet found — install MetaMask or Rabby.'; return; }
-  btn.disabled = true; btn.textContent = 'Connecting\\u2026';
-  try {
-    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    const address = accounts && accounts[0];
-    if (!address) throw new Error('No account returned');
-    const nres = await fetch('/api/auth/nonce');
-    const nj = await nres.json();
-    if (!nj.ok) throw new Error(nj.error || 'nonce failed');
-    btn.textContent = 'Waiting for signature\\u2026';
-    const signature = await window.ethereum.request({ method: 'personal_sign', params: [nj.message, address] });
-    btn.textContent = 'Verifying\\u2026';
-    const vres = await fetch('/api/auth/verify', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ address, signature, nonce: nj.nonce }) });
-    const vj = await vres.json();
-    if (!vj.ok) throw new Error(vj.error || 'verification failed');
-    location.reload();
-  } catch (e) {
-    if (e && e.code === 4001) err.textContent = 'Signature rejected in wallet.';
-    else err.textContent = e.message || String(e);
-    btn.disabled = false; btn.textContent = 'Connect wallet & sign in';
-  }
-}
-</script></body></html>`;
-export { LOGIN_PAGE_HTML };
+// ── Unauthenticated placeholder (rendered inside the normal shell — 2026-09-19) ──
+// There is no separate login page/document anymore: signing in IS the header
+// "Connect wallet" button (wallet-connect.js performs connect + nonce + sign +
+// verify in one flow). An unauthenticated page request gets the exact same
+// header/nav/chrome as everyone else, with this in the content area instead
+// of real (per-user) data — never the standalone-doc gate the app used to
+// swap in, and never another user's data (getDipWatchers(null) etc. return
+// an all-users legacy view, so this placeholder is also a safety boundary).
+const CONNECT_PROMPT_BODY = `
+  <div class="card" style="max-width:420px;margin:3rem auto;text-align:center">
+    <h2 style="margin-top:0">Connect your wallet</h2>
+    <p class="hint">Click <strong>Connect wallet</strong> in the header and sign the login message to continue.<br>The signature proves ownership only — it never moves funds.</p>
+  </div>`;
 
 /**
  * The gate. Call FIRST in the request handler; returns true when the request
- * was fully handled (login page / 401 JSON / auth endpoint) and the caller
- * must `return;`. Returns false to proceed with normal routing.
+ * was fully handled (placeholder page / 401 JSON / auth endpoint) and the
+ * caller must `return;`. Returns false to proceed with normal routing.
  */
-export async function handleAuth(req, res, { url, method, readBody, json, send }) {
+export async function handleAuth(req, res, { url, method, readBody, json, send, shell }) {
   // Auth endpoints are always reachable (login chicken-and-egg).
   if (url === "/api/auth/nonce" && method === "GET") {
     const nonce = issueNonce();
@@ -298,21 +270,13 @@ export async function handleAuth(req, res, { url, method, readBody, json, send }
 
   if (isAuthed(req)) return false;
 
-  // Unauthenticated: API/SSE get 401 JSON; pages get the login page.
+  // Unauthenticated: API/SSE get 401 JSON; pages get the normal shell with a
+  // connect-prompt body — the header's Connect-wallet button IS the sign-in
+  // flow (no separate gate document).
   if (url.startsWith("/api/")) {
     json({ ok: false, error: "authentication required" }, 401);
     return true;
   }
-  // AppKit login page (Phase 2 hosted): full wallet modal when a Reown project
-  // id is configured; the simple injected-only page is the fallback.
-  const wcProjectId = envValue("WALLET_CONNECT_PROJECT_ID");
-  if (wcProjectId) {
-    const { AUTH_LOGIN_PAGE } = await import("./auth-appkit.js");
-    const { getChain } = await import("./chains.mjs");
-    const rpcUrl = getChain("ethereum").httpRpc();
-    send(AUTH_LOGIN_PAGE(wcProjectId, rpcUrl));
-    return true;
-  }
-  send(LOGIN_PAGE_HTML);
+  send(shell("Sign in", CONNECT_PROMPT_BODY));
   return true;
 }

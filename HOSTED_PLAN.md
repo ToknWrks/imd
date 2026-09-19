@@ -59,16 +59,28 @@ broke under multiple wallets. All landed and verified on the VPS:
 - ✅ **Overview is per-user** (`8e8046d`→`25bf3c1`): watchers, sniper ledger,
   and gas breakdown all session-filtered; gas rows owner-stamped at
   record/backfill; 8 legacy rows stamped from trade-table owner lookup.
+- ✅ **Login unified with the header Connect-wallet button, CONNECTED_WALLET
+  deleted** (2026-09-19): there is no separate login page anymore — the
+  header's "Connect wallet" button IS the sign-in flow (connect → nonce →
+  personal_sign → verify → reload). This also fixed the bug item #1 below
+  used to describe: CONNECTED_WALLET was a single global `.env` value shared
+  by every user, so every co-pilot-mode user (the default) saw the SAME
+  wallet's balances/header address — whoever last clicked "Connect wallet"
+  anywhere. Identity is now always `sessionAddress(req)` (the signed-in
+  cookie), threaded per request, never a global/env value. Also fixed:
+  `AppKit.subscribeState()` never carries an address (only `subscribeAccount`
+  does) — the login flow used to hang with no signature prompt on a fresh
+  connect until a page refresh papered over it. See CLAUDE.md Hard-Won
+  Lessons for both.
 
 ### Still open (found during that sweep, not yet built)
 
-1. `CONNECTED_WALLET` is one global env value — needs per-user connect state.
-2. `mm_trades` + `sniper_autosells` have no `user_id` (MM never migrated).
-3. Gas backfill is manual — sniper buys never record gas at trade time;
+1. `mm_trades` + `sniper_autosells` have no `user_id` (MM never migrated).
+2. Gas backfill is manual — sniper buys never record gas at trade time;
    schedule `POST /api/gas/backfill` (cron or watcher timer).
-4. No arbitrary-ERC20 move-out UI — slideout moves ETH/dollar only. Build
+3. No arbitrary-ERC20 move-out UI — slideout moves ETH/dollar only. Build
    before any meaningful tokens sit in a user's SCW (autonomy switch).
-5. Shared pm2 daemon with the agentsignal app — scoped commands enforced by
+4. Shared pm2 daemon with the agentsignal app — scoped commands enforced by
    convention, not by separation. Strongest fix: separate PM2_HOME per app.
 
 ## Phase 1 — host it for yourself (the near path)
@@ -108,8 +120,9 @@ Multi-tenancy does not exist. These are the gaps, roughly in build order:
    10-blocks-per-getLogs across users).
 4. **Signer cache fix** — `_signerPromises` is keyed `chainKey` only; multi-user
    hands user A's signer to user B. Key it `userId:chainKey`. Same for the
-   co-pilot signer cache and the connected-wallet registry (one
-   `CONNECTED_WALLET` today).
+   co-pilot signer cache. (The connected-wallet registry itself is already
+   per-user, keyed by wallet address — the single global `CONNECTED_WALLET`
+   env value this used to reference was removed 2026-09-19.)
 5. **Per-user smart accounts or per-user co-pilot.** Two viable postures:
    - **Co-pilot by default (recommended):** each user connects their own
      browser wallet; the server proposes, the user signs; non-custodial by
