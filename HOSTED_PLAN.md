@@ -36,6 +36,41 @@ smart-account migration (2026-09-17) and the co-pilot build (2026-09-18).
 - ✅ VPS runbook (`docs/vps-deploy.md`) — provision → pm2 → scoped control →
   health checks; coexists with the trader app.
 
+## Session 2026-09-18/19 — hosted rebuild + per-user correctness sweep
+
+The VPS rebuild surfaced and fixed a chain of single-user assumptions that
+broke under multiple wallets. All landed and verified on the VPS:
+
+- ✅ **Key persistence** (`8915012`): MASTER_KEY required (hard throw),
+  registry keys encrypted at rest, no auto-mint on unreadable keys. See
+  CLAUDE.md § Key-persistence.
+- ✅ **Unified per-user wallet** (`e0d342c`): the registry (per-connected-
+  wallet) is the single source of truth; Settings generate dual-writes both
+  stores; one resolver (`resolveUserSessionKeyAsync`) everywhere.
+- ✅ **Read vs sign wallet split** (`1927d03`, `f896415`):
+  `resolveUserReadWallet()` for every balance path (watcher, sniper,
+  wallet-sync); trades still sign via `resolveSignerUser`.
+- ✅ **Login account selection** (`ac3d8fb`): AppKit connection cache cleared
+  before the modal opens — switching wallets actually switches sessions.
+- ✅ **Slideout is per-user** (`63eaa4f`): smart-wallet card shows the
+  session user's SCW; co-pilot users get a "generate a session key in
+  Settings" instruction card instead of a fundable address. Legacy env
+  `AA_SESSION_KEY` deleted from the VPS.
+- ✅ **Overview is per-user** (`8e8046d`→`25bf3c1`): watchers, sniper ledger,
+  and gas breakdown all session-filtered; gas rows owner-stamped at
+  record/backfill; 8 legacy rows stamped from trade-table owner lookup.
+
+### Still open (found during that sweep, not yet built)
+
+1. `CONNECTED_WALLET` is one global env value — needs per-user connect state.
+2. `mm_trades` + `sniper_autosells` have no `user_id` (MM never migrated).
+3. Gas backfill is manual — sniper buys never record gas at trade time;
+   schedule `POST /api/gas/backfill` (cron or watcher timer).
+4. No arbitrary-ERC20 move-out UI — slideout moves ETH/dollar only. Build
+   before any meaningful tokens sit in a user's SCW (autonomy switch).
+5. Shared pm2 daemon with the agentsignal app — scoped commands enforced by
+   convention, not by separation. Strongest fix: separate PM2_HOME per app.
+
 ## Phase 1 — host it for yourself (the near path)
 
 Everything needed to run the CURRENT single-user app on a VPS safely:
