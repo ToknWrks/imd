@@ -69,16 +69,24 @@ export function AUTH_LOGIN_PAGE(projectId, rpcUrl) {
     err.textContent = '';
     try {
       btn.disabled = true;
+      // FORCE ACCOUNT SELECTION (2026-09-19): AppKit caches its connection in
+      // localStorage — a previously-used wallet silently re-connects and the
+      // modal never shows the account picker, so users think they switched
+      // wallets while the server session stayed on the old address. Disconnect
+      // any stale session first, and WAIT for the teardown to settle before
+      // opening the modal — signing through a half-torn-down provider hangs
+      // forever (personal_sign spins, no prompt ever appears).
+      try { await modal.disconnect?.(); } catch {}
+      try { localStorage.removeItem('@appkit/connection'); localStorage.removeItem('@w3m/connected'); localStorage.removeItem('wagmi.connected'); localStorage.removeItem('wagmi.wallet'); } catch {}
+      await new Promise((r) => setTimeout(r, 250)); // let AppKit finish teardown
       // Open the AppKit universal modal — user picks ANY wallet.
       modal.open();
 
-      // Wait for connection. Check the CURRENT state FIRST (a wallet may
-      // already be connected from a previous session — subscribeState only
-      // fires on CHANGE, so a pre-connected wallet would hang the wait).
-      const getAddress = () => modal.getAddress?.() || modal.getState?.()?.address;
+      // Wait for a FRESH connection — do NOT trust an "immediate" address
+      // here: right after a disconnect, AppKit can still report the cached
+      // address while its provider is unusable. Only a state EVENT (subscribe
+      // firing with an address) proves the wallet genuinely connected.
       const address = await new Promise((resolve, reject) => {
-        const immediate = getAddress();
-        if (immediate) { resolve(immediate); return; }
         const timeout = setTimeout(() => reject(new Error('No wallet connected within 120s — try again')), 120000);
         const unsub = modal.subscribeState((state) => {
           if (state.address) { unsub(); clearTimeout(timeout); resolve(state.address); }
@@ -94,7 +102,12 @@ export function AUTH_LOGIN_PAGE(projectId, rpcUrl) {
       // Sign via the wallet's EIP-1193 provider (AppKit exposes it directly)
       const provider = modal.getWalletProvider?.();
       if (!provider?.request) throw new Error('wallet provider unavailable — try an injected wallet');
-      const signature = await provider.request({ method: 'personal_sign', params: [nj.message, address] });
+      const signature = await Promise.race([
+        provider.request({ method: 'personal_sign', params: [nj.message, address] }),
+        // If the provider is half-torn-down the request NEVER settles —
+        // surface a retry instead of spinning until the 120s timeout.
+        new Promise((_, reject) => setTimeout(() => reject(new Error('signature request stalled — click Sign in again')), 45000)),
+      ]);
 
       btn.textContent = 'Verifying…';
       const vres = await fetch('/api/auth/verify', { method:'POST', headers:{'Content-Type':'application/json'},
