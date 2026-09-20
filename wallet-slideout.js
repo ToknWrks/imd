@@ -510,7 +510,7 @@ async function swActivateV2(){
     if(!j.ok)throw new Error(j.error||'activate failed');
     if(j.alreadyDeployed){_swStatus('\u2713 already deployed');setTimeout(function(){openWallet();},1200);return;}
     if(!j.browserSign)throw new Error('unexpected activation payload');
-    _swStatus('signing the deploy in your wallet…',true);
+    _swStatus('Single step — signing the deploy in your wallet (one tx, no follow-ups)…',true);
     var accts=await window.ethereum.request({method:'eth_requestAccounts'});
     var from=accts&&accts[0];
     if(!from){_swStatus('no account active in your wallet',false,true);return;}
@@ -545,12 +545,13 @@ var _padW=function(h,n){h=String(h||'0x');if(h.slice(0,2)!=='0x')h='0x'+h;h=h.sl
 var dataWL=function(hex,nBytes){hex=hex||'';while(hex.length<nBytes*2)hex=hex+'0';return hex;};
 // Sign the UO digest in the browser and submit handleOps from the user's EOA.
 // quote = server payload (userOp, digestToSign, entryPoint).
-async function swSignAndSubmit(quote,label){
-  _swStatus('signing in your wallet…',true);
+async function swSignAndSubmit(quote,label,step,steps){
+  _swStatus('Step '+step+' of '+steps+' — signing in your wallet…',true);
   var accts=await window.ethereum.request({method:'eth_requestAccounts'});
   var from=accts&&accts[0];
   if(!from)throw new Error('no account active in your wallet');
   var sig=await window.ethereum.request({method:'personal_sign',params:[quote.digestToSign,from]});
+  _swStatus('Step '+step+' of '+steps+' done — step '+(step+1)+' of '+steps+': broadcasting in your wallet…',true);
   // normalize v (some wallets return 0/1)
   var v=parseInt(sig.slice(-2),16);
   if(v===0||v===1)sig=sig.slice(0,-2)+(v+27).toString(16).padStart(2,'0');
@@ -611,9 +612,9 @@ async function swMoveOutBrowser(asset){
     var j=await r.json();
     if(!j.ok)throw new Error(j.error||'sweep quote failed');
     if(!j.digestToSign)throw new Error('sweep payload missing digest');
-    _swStatus('signing the sweep in your wallet…',true);
-    var txHash=await swSignAndSubmit(j,'sweep');
-    _swStatus('\u2713 sent — tx '+(txHash||'').slice(0,10)+'… reloading…');
+    _swStatus('Step 1 of 2 — preparing the sweep…',true);
+    var txHash=await swSignAndSubmit(j,'sweep',1,2);
+    _swStatus('\u2713 Step 2 of 2 done — sent, tx '+(txHash||'').slice(0,10)+'… reloading…');
     setTimeout(function(){openWallet();},2200);
   }catch(e){
     if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);return;}
@@ -630,9 +631,9 @@ async function swGrantAutonomy(){
     var j=await r.json();
     if(!j.ok)throw new Error(j.error||'grant quote failed');
     if(!j.digestToSign)throw new Error('grant payload missing digest');
-    _swStatus('signing the grant in your wallet…',true);
-    var txHash=await swSignAndSubmit(j,'grant');
-    _swStatus('\u2713 grant sent — automation lands when the tx mines…',true);
+    _swStatus('Step 1 of 2 — grant prepared. Your wallet will ask to SIGN the authorization…',true);
+    var txHash=await swSignAndSubmit(j,'grant',1,2);
+    _swStatus('\u2713 Both steps done — grant sent, tx '+(txHash||'').slice(0,10)+'… waiting for it to mine…',true);
     // Poll status until grantStatus flips (the server reads the chain, not our word)
     var deadline=Date.now()+180000;
     while(Date.now()<deadline){
