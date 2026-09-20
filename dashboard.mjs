@@ -2370,7 +2370,8 @@ const server = createServer(async (req, res) => {
     }
     if (url === "/api/smart-wallet/activate" && method === "POST") {
       try {
-        const { chain, from } = JSON.parse(await readBody() || "{}");
+        const body = JSON.parse(await readBody() || "{}");
+        const { chain, from } = body;
         // Hosted has no AGENT_PRIVATE_KEY by design — when the client sends its
         // browser-wallet address, return the unsigned factory call for it to
         // sign (user's EOA pays deploy gas) instead of the env-signer path.
