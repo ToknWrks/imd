@@ -150,11 +150,6 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
             <button class="secondary" type="button" onclick="accumulateToken()">Accumulate</button>
             <span id="sellStatus" class="hint" style="margin-left:0.5rem"></span>
           </div>
-          <div class="card">
-            <h2>Approvals</h2>
-            <button class="secondary" type="button" onclick="loadApprovals()">Refresh allowances</button>
-            <div id="approvals" style="margin-top:0.75rem"><p class="hint">Refresh after the signer is configured.</p></div>
-          </div>
         </div>
       </div>
       <div class="card">
@@ -519,31 +514,13 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
         } catch (e) { status.textContent = e.message; }
       }
 
-      async function loadApprovals() {
-        const token = document.getElementById("token").value.trim();
-        const el = document.getElementById("approvals");
-        el.innerHTML = '<p class="hint">loading...</p>';
-        try {
-          const r = await fetch("/api/sniper/approvals", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ chain: ctx.chain, token: token || undefined }) });
-          const j = await r.json();
-          if (!j.ok) { el.innerHTML = '<p class="hint">' + esc(j.error) + '</p>'; return; }
-          el.innerHTML = j.rows.map((row) =>
-            '<div class="approval-row"><div><div style="font-weight:600">' + esc(row.token) + ' → ' + esc(row.spender) + '</div></div>' +
-            (row.approved
-              ? '<span class="pill on">approved</span>'
-              : '<button type="button" class="secondary" onclick="approve(\\'' + row.tokenAddress + '\\',\\'' + row.spenderAddress + '\\')">approve</button>')
-            + '</div>'
-          ).join("") || '<p class="hint">no spenders to show</p>';
-        } catch (e) { el.innerHTML = '<p class="hint">' + esc(e.message) + '</p>'; }
-      }
-
-      async function approve(token, spender) {
-        try {
-          const r = await fetch("/api/sniper/approve", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ chain: ctx.chain, token, spender, maxGasGwei: document.getElementById("maxGas").value }) });
-          const j = await r.json();
-          if (j.ok) loadApprovals(); else alert(j.error);
-        } catch (e) { alert(e.message); }
-      }
+      // Approvals card removed (2026-09-19): buys pay native ETH (no ERC-20
+      // approval involved) and the old card read the GLOBAL env signer's
+      // allowances (a wallet belonging to nobody), plus a USDC row nothing
+      // on this platform uses. Sells through the app set their own approvals
+      // (Permit2 / exact router spends) server-side when a venue needs them.
+      // The /api/sniper/approvals + /api/sniper/approve routes still exist
+      // (unused) — remove them if nothing re-adopts the flow.
 
       async function sellNow() {
         const status = document.getElementById("sellStatus");
