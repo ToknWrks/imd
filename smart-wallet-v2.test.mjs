@@ -128,6 +128,20 @@ const SNIPPET = `
   catch (e) { threw = e.message; }
   out.push(["moveout-blocked", threw !== null && /browser/.test(threw)]);
 
+  // 7. quoteDirectSweepV2 guards (2026-09-20 direct-execute sweep): needs a v2
+  //    record and a positive amount — both checked BEFORE any RPC call.
+  //    probe HAS a record by now (step 1), so the no-record check uses a fresh
+  //    address; the no-amount check fires before RPC for any address.
+  threw = null;
+  const bare = "0x" + "b".repeat(39) + "1";
+  try { await mod.quoteDirectSweepV2(bare, "ethereum", { asset: "eth", amount: 0.1 }); }
+  catch (e) { threw = e.message; }
+  out.push(["direct-sweep-needs-record", threw !== null && /no v2 record/.test(threw)]);
+  threw = null;
+  try { await mod.quoteDirectSweepV2(probe, "ethereum", { asset: "eth", amount: 0 }); }
+  catch (e) { threw = e.message; }
+  out.push(["direct-sweep-needs-amount", threw !== null && /positive amount/.test(threw)]);
+
   const fails = out.filter(([, ok]) => !ok);
   for (const [name, ok] of out) console.log((ok ? "PASS" : "FAIL") + " " + name);
   process.exit(fails.length ? 1 : 0);
@@ -139,5 +153,7 @@ test("v2 wallet lifecycle: derive → copilot-null → read → browser-activate
   assert.match(out, /PASS read-wallets-v2/);
   assert.match(out, /PASS activate-owner/);
   assert.match(out, /PASS moveout-blocked/);
+  assert.match(out, /PASS direct-sweep-needs-record/);
+  assert.match(out, /PASS direct-sweep-needs-amount/);
   assert.doesNotMatch(out, /FAIL/);
 });

@@ -227,9 +227,9 @@ function renderSmartWalletSection(){
     h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw&&scw.eth)+'</span>'+usd(scw&&scw.eth!=null?scw.eth*ethUsd2:null)+'</div>';
     // Move-out is browser-signed for v2 (owner EOA sends directly)
     if(browserWallet2){
-      h2+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('eth')" + '">\u2190 Move out</button></div>';
+      h2+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMaxV2()" title="Fill the full balance — a direct sweep takes no gas from the wallet, so 100% goes out">MAX</button><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('eth')" + '">\u2190 Move out</button></div>';
       h2+=swHintRow('swOutEthHint');
-      h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Sweep = sign in your wallet; the SCW \u2192 your EOA transfer rides inside the same tx.</div>';
+      h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Sweep = sign in your wallet; 100% of the balance can go \u2014 your EOA pays the tx gas from outside, the smart wallet sends everything.</div>';
     }
     h2+='<div class="sw-status" id="swStatus"></div>';
     h2+='<div style="margin-top:0.6rem">';
@@ -448,6 +448,15 @@ function swFillMax() {
     else _swStatus('no ETH to move');
   }
 }
+// Fill the outbound ETH input with the FULL SCW balance (v2 direct sweep):
+// execute() takes no gas from the SCW, so the whole balance can leave.
+function swFillMaxV2() {
+  const inp = document.getElementById('swOutEth');
+  if (!inp || !_swState) return;
+  const b = _swState.scw && _swState.scw.eth;
+  if (b > 0) { inp.value = b.toFixed(6); _swStatus('full balance \u2014 a direct sweep sends 100% (your EOA pays the tx gas)'); }
+  else _swStatus('no ETH to move');
+}
 function _swStatus(msg,busy,err){
   var el=document.getElementById('swStatus'); if(!el)return;
   el.textContent=msg||''; el.style.color=err?'#f87171':(busy?'rgba(255,255,255,0.6)':'#4ade80');
@@ -597,9 +606,11 @@ function swHandleOpsData(uo,beneficiary){
     +lenWord(pm)+dataWL(pm,pmT-32)
     +lenWord(sig)+dataWL(sig,sigT-32);
 }
-// Move-out for v2: the OWNER signs a sweep UO (SCW → their EOA) and submits it
-// from their own wallet — pays its own gas, works pre-grant (owner entity
-// validates the UO, no session key involved).
+// Move-out for v2 (2026-09-20 direct-execute redesign): the server returns a
+// PLAIN tx {to: scw, data: execute(...)} — the owner EOA calls execute() on
+// its own SCW, so the SCW sends 100% of its ETH and pays zero gas (the EOA
+// pays the tx gas from outside). A legacy handleOps quote (digestToSign) is
+// still accepted for compatibility, signed via the 2-step UO path.
 async function swMoveOutBrowser(asset){
   var input=document.getElementById(asset==='eth'?'swOutEth':'swOutImd');
   if(!input||!_swState)return;
@@ -611,6 +622,14 @@ async function swMoveOutBrowser(asset){
     var r=await fetch('/api/smart-wallet/move-out-v2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,asset:asset,amount:amount,from:_wcAddress})});
     var j=await r.json();
     if(!j.ok)throw new Error(j.error||'sweep quote failed');
+    if(j.directExecute&&j.to&&j.data){
+      // Direct path — single step: the EOA sends execute() straight to the SCW.
+      _swStatus('signing in your wallet (single step)…',true);
+      var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:_wcAddress,to:j.to,data:j.data,chainId:chainIdHexFor(_swState.chain),gas:'0x'+Number(200000).toString(16)}]});
+      _swStatus('\u2713 sent — 100% sweep, tx '+(txHash||'').slice(0,10)+'… reloading…');
+      setTimeout(function(){openWallet();},2200);
+      return;
+    }
     if(!j.digestToSign)throw new Error('sweep payload missing digest');
     _swStatus('Step 1 of 2 — preparing the sweep…',true);
     var txHash=await swSignAndSubmit(j,'sweep',1,2);

@@ -2423,12 +2423,15 @@ const server = createServer(async (req, res) => {
     // Note: the grant/sweep UOs are submitted by the BROWSER (eth_sendTransaction
     // of handleOps — user's EOA pays relay gas). The old server-relay submit
     // endpoints were removed; the server's remaining role is quoting + confirming.
-    // v2 sweep (SCW → browser EOA): quote the owner-signed UO.
+    // v2 sweep (SCW → browser EOA): 2026-09-20 direct-execute quote — the
+    // owner EOA calls `execute` on the SCW directly (no EntryPoint), so the
+    // SCW sends 100% of its ETH and pays no gas. quoteMoveOutV2 (handleOps
+    // UO) remains available as a legacy fallback but nothing calls it now.
     if (url === "/api/smart-wallet/move-out-v2" && method === "POST") {
       try {
         const { chain, asset, amount, from } = JSON.parse(await readBody() || "{}");
-        const { quoteMoveOutV2 } = await import("./smart-wallet-api.mjs");
-        return json(await quoteMoveOutV2(sessionAddress(req), chain || "ethereum", { asset: asset || "eth", amount, browserFrom: from || null }));
+        const { quoteDirectSweepV2 } = await import("./smart-wallet-api.mjs");
+        return json(await quoteDirectSweepV2(sessionAddress(req), chain || "ethereum", { asset: asset || "eth", amount, browserFrom: from || null }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
 

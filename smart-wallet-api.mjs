@@ -15,9 +15,14 @@
  * "out" = the SCW signs a UserOperation (transfer ETH or ERC-20 back to owner).
  *
  * Safety notes:
- *  - Gas reserve: outbound ETH keeps gasReserveWei in the SCW (EntryPoint
- *    prefund is taken from the account itself — the AA23 class of failures
- *    rangedesk documents happens when you send "max" without a reserve).
+ *  - v2 sweeps (2026-09-20, fork-verified): the owner EOA calls `execute`
+ *    DIRECTLY on the SCW (73,829 gas) — no EntryPoint, no prefund, no gas
+ *    reserve. The SCW sends 100.0000% of its ETH and pays zero gas; the
+ *    browser EOA pays the tx gas from outside. Works pre-grant (entity 0 =
+ *    global owner validates msg.sender) and for ERC-20 calldata too.
+ *  - v1 outbound ETH keeps gasReserveWei in the SCW (EntryPoint prefund is
+ *    taken from the account itself — the AA23 class of failures rangedesk
+ *    documents happens when you send "max" without a reserve).
  *  - The move routes never touch strategy funds implicitly — they are explicit
  *    user actions with an amount typed in the UI.
  */
@@ -766,9 +771,60 @@ export async function confirmGrant(userId, chainKey = "ethereum") {
 }
 
 // ── v2 move-out (owner-signed sweep, SCW → browser EOA) ──────────────────────
-// The owner entity (entity 0, global validation) validates any calldata, so a
-// sweep works pre-grant. The browser signs the digest; the server verifies it
-// recovers the owner, then relays handleOps. Gas: SCW prefund (EntryPoint).
+// 2026-09-20 redesign (fork-verified, scripts/.dryrun-sweep-*.mjs): the owner
+// EOA calls `execute` DIRECTLY on the SCW instead of routing through the
+// EntryPoint. Consequences the UX cares about:
+//   - The SCW pays ZERO gas — it can send 100.0000% of its ETH (SCW left at
+//     exactly 0, verified). No prefund, no AA23, no "keep $2.5 behind" clamp.
+//   - The browser EOA pays the tx gas from OUTSIDE (it's a plain EOA tx).
+//   - Works pre-grant (entity 0 = global owner validates any msg.sender).
+//   - Same shape carries ERC-20 calldata (WETH transfer verified live).
+
+/** Build the direct-sweep payload: { to: scwAddress, data: execute(...) } for
+ *  the browser to sign as a PLAIN tx (eth_sendTransaction). No UO, no digest. */
+export async function quoteDirectSweepV2(userId, chainKey = "ethereum", { asset = "eth", amount = 0, browserFrom = null } = {}) {
+  const rec = getWalletRecord(userId);
+  if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
+  const ownerEoa = getAddress(rec.ownerEoa);
+  const scwAddress = getAddress(rec.scwAddress);
+  if (browserFrom && getAddress(browserFrom).toLowerCase() !== ownerEoa.toLowerCase()) {
+    throw new Error(`sweep must be signed by the wallet owner ${ownerEoa}`);
+  }
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw new Error("enter a positive amount");
+  const pub = await publicClientFor(chainKey);
+  const code = await pub.getCode({ address: scwAddress }).catch(() => "0x");
+  if (!code || code === "0x") throw new Error("smart wallet is not deployed yet — activate it first");
+  const dep = getChain(chainKey);
+
+  const executeAbi = parseAbi(["function execute(address target, uint256 value, bytes data)"]);
+  let data;
+  if (asset === "eth") {
+    const ethWei = await pub.getBalance({ address: scwAddress }).catch(() => 0n);
+    if (ethWei === 0n) throw new Error("smart wallet has no ETH to sweep");
+    // Amounts at/above the full balance mean "send 100.0000%" — the direct
+    // execute takes no gas from the SCW, so the FULL balance goes out.
+    const value = parseUnits(String(amt), 18) >= ethWei ? ethWei : parseUnits(String(amt), 18);
+    data = encodeFunctionData({ abi: executeAbi, functionName: "execute", args: [ownerEoa, value, "0x"] });
+  } else {
+    const token = asset === "imd" ? dep.imdToken : dep.dollar;
+    if (!token) throw new Error(`no ${asset} token configured on ${chainKey}`);
+    const decimals = asset === "imd" ? (dep.imdDecimals ?? 18) : (dep.dollarDecimals ?? 6);
+    const inner = encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ownerEoa, parseUnits(String(amt), decimals)] });
+    data = encodeFunctionData({ abi: executeAbi, functionName: "execute", args: [getAddress(token), 0n, inner] });
+  }
+  return {
+    ok: true,
+    browserSign: true,
+    schema: 2,
+    directExecute: true,      // UI: plain eth_sendTransaction, NOT handleOps
+    to: scwAddress,
+    data,
+    asset,
+    requestedAmount: amt,
+    message: "Sign in your browser wallet — the SCW sends everything; your EOA pays the tx gas from outside.",
+  };
+}
 
 /** Quote a v2 sweep: build the transfer UO and return the digest to sign. */
 export async function quoteMoveOutV2(userId, chainKey = "ethereum", { asset = "eth", amount = 0, browserFrom = null } = {}) {
