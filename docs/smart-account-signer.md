@@ -6,6 +6,15 @@
 > historical; the as-built state lives in `CLAUDE.md` § "Wallet-Connect &
 > Smart Account (2026-09-17 migration)". Phase 2 (on-chain session-key
 > policy) remains future work.
+>
+> **UPDATE 2026-09-20 — v2 wallets supersede this model for NEW connections.**
+> New wallets are SMA v2 accounts OWNED BY THE USER'S EOA (deterministic
+> CREATE2 derivation, one browser-signed activation, no gas-key funding).
+> The session key becomes an entity-1 operator via `installValidation` only
+> when the user enables automation — granted in a browser-signed UO, so the
+> server never needs a relayer key. This document describes the LEGACY v1
+> path, which existing wallets continue to use. See `CLAUDE.md` § "Signer &
+> custody matrix" for the current two-generation matrix.
 
 Decision: for VPS hosting, replace the vault-file model with an ERC-4337
 smart account (Alchemy Account Kit, Modular Account v2 — the exact stack

@@ -23,10 +23,92 @@
  */
 import { WalletClientSigner } from "@aa-sdk/core";
 import { alchemy, mainnet, base, defineAlchemyChain } from "@account-kit/infra";
-import { createLightAccountClient, createMultiOwnerLightAccountAlchemyClient } from "@account-kit/smart-contracts";
-import { createWalletClient, createPublicClient, http, getAddress, encodeFunctionData } from "viem";
+import { createLightAccountClient, createMultiOwnerLightAccountAlchemyClient, predictModularAccountV2Address } from "@account-kit/smart-contracts";
+import { getDefaultSingleSignerValidationModuleAddress } from "@account-kit/smart-contracts/experimental";
+import { createWalletClient, createPublicClient, http, getAddress, encodeFunctionData, concat } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { getChain } from "./chains.mjs";
+
+// ── User-EOA-owned SCW derivation (plan 2026-09-20, "kill the backup-key problem") ──
+// New wallets derive their smart account from the CONNECTED EOA (the owner),
+// not from a server-held session key. Verified on a mainnet fork 2026-09-20:
+// predictModularAccountV2Address({ type: "SMA" }) reproduces the factory's
+// CREATE2 address exactly, and a direct owner EOA tx to
+// createSemiModularAccount(owner, 0) deploys at the predicted address (97,772 gas).
+export const MAV2_FACTORY = "0x00000000000017c61b5bEe81050EC8eFc9c6fecd";
+export const SMAV2_IMPL = "0x000000000000c5A9089039570Dd36455b5C07383";
+
+/**
+ * Deterministic counterfactual SCW address for a user-EOA-owned SMA v2.
+ * Pure math — no key, no RPC. Same (chain, eoa, salt) → same address, which is
+ * the property the registry relies on for v2 records.
+ */
+export function predictEoaOwnedScwAddress(chainKey, eoaAddress, salt = 0n) {
+  const accountKitChain = accountKitChainFor(chainKey);
+  return getAddress(predictModularAccountV2Address({
+    factoryAddress: MAV2_FACTORY,
+    implementationAddress: SMAV2_IMPL,
+    salt,
+    type: "SMA",
+    ownerAddress: getAddress(eoaAddress),
+  }));
+
+  function accountKitChainFor(key) {
+    return CHAIN_MAP[key] ?? mainnet;
+  }
+}
+
+/** The SingleSignerValidationModule address for a chain (session-key entity 1). */
+export function ssvModuleAddress(chainKey) {
+  return getDefaultSingleSignerValidationModuleAddress(CHAIN_MAP[chainKey] ?? mainnet);
+}
+
+// EntryPoint 0.7 hashing — the exact module the fork dry run used, so browser
+// personal_sign signatures verify against the same digest the server computes.
+// @aa-sdk/core does not export the entrypoint submodule, so resolve the dist
+// file directly (same file the dry run imported by relative path).
+import { fileURLToPath } from "url";
+import { dirname as _dirname, resolve as _resolve } from "path";
+const _here = _dirname(fileURLToPath(import.meta.url));
+const ep07 = (await import(/* webpackIgnore: true */ "file://" + _here + "/node_modules/@aa-sdk/core/dist/esm/entrypoint/0.7.js")).default;
+export const ENTRY_POINT_V7 = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+
+/**
+ * The EIP-191 digest the wallet must sign for a UserOperation (what
+ * handleOps will recover). `userOp` takes hex-string gas fields exactly as
+ * the grant/move-out APIs emit them. Browser flow: personal_sign(digest) →
+ * the returned 65-byte sig is packed with packUOSignature ("0xFF00"+sig).
+ * Verified end-to-end on the 2026-09-20 mainnet fork (both UO legs).
+ */
+export function userOpDigest(chainKey, userOp) {
+  return ep07.getUserOperationHash(
+    {
+      sender: userOp.sender,
+      nonce: userOp.nonce,
+      initCode: userOp.initCode ?? "0x",
+      callData: userOp.callData,
+      verificationGasLimit: userOp.verificationGasLimit,
+      callGasLimit: userOp.callGasLimit,
+      maxFeePerGas: userOp.maxFeePerGas,
+      maxPriorityFeePerGas: userOp.maxPriorityFeePerGas,
+      preVerificationGas: userOp.preVerificationGas,
+      paymasterAndData: userOp.paymasterAndData ?? "0x",
+    },
+    ENTRY_POINT_V7,
+    CHAIN_MAP[chainKey]?.id ?? 1
+  );
+}
+
+/** Pack a browser personal_sign signature into the SMA UO signature format. */
+export function packUOSignature(validationSignature) {
+  // normalize v: some wallets return 0/1 instead of 27/28
+  let sig = validationSignature;
+  if (/^0x[0-9a-fA-F]{130}$/.test(sig)) {
+    const v = parseInt(sig.slice(-2), 16);
+    if (v === 0 || v === 1) sig = sig.slice(0, -2) + (v + 27).toString(16).padStart(2, "0");
+  }
+  return concat(["0xFF", "0x00", sig]);
+}
 
 // Robinhood 4663 — same definition rangedesk uses (Alchemy supports the chain
 // even though VultiSig does not; AA is chain-agnostic via this definition).

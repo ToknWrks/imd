@@ -19,6 +19,16 @@
  * Persistence: data/connected-wallets.json (gitignored data dir, same place the
  * SQLite DB lives). Structure survives restarts; .env stays single-value for
  * the ACTIVE wallet only.
+ *
+ * v2 records (2026-09-20, plan "kill the backup-key problem"):
+ *   { schema: 2, scwAddress, ownerEoa, salt, sessionKeyEnc: null,
+ *     sessionKeyAddress: null, grantStatus: "none"|"granted"|"deferred", ... }
+ * The SCW owner is the CONNECTED WALLET itself; no session key exists at derive
+ * time. sessionKeyEnc: null in a v2 record is the co-pilot state, NOT "key
+ * lost" — readers must branch on isV2Record() before applying the funds-safety
+ * guard. The session key (when granted) rides entity 1 (SingleSignerValidation)
+ * and its grant state is tracked in grantStatus. Schema is ADD-ONLY: v1 records
+ * are never rewritten into v2.
  */
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
@@ -27,6 +37,11 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "data");
 const REGISTRY_FILE = resolve(DATA_DIR, "connected-wallets.json");
+
+/** True when a registry record is the v2 (user-EOA-owned) shape. */
+export function isV2Record(rec) {
+  return Boolean(rec && rec.schema === 2 && rec.ownerEoa);
+}
 
 function loadRegistry() {
   try {
@@ -57,18 +72,38 @@ export function getWalletRecord(connectedAddress) {
   return reg[key] ?? null;
 }
 
-/** Record that a connected wallet now owns the given smart account + session key. */
-export function setWalletRecord(connectedAddress, { scwAddress, sessionKeyAddress, sessionKeyEnc }) {
+/** Record that a connected wallet now owns the given smart account.
+ *  v2 (user-EOA-owned): pass ownerEoa — stores a schema-2 record, no session key.
+ *  v1 (legacy): pass sessionKeyEnc (+ optionally sessionKeyAddress). */
+export function setWalletRecord(connectedAddress, { scwAddress, sessionKeyAddress, sessionKeyEnc, ownerEoa, salt, grantStatus }) {
   if (!connectedAddress || !/^0x[0-9a-fA-F]{40}$/.test(connectedAddress)) return false;
   const key = connectedAddress.toLowerCase();
   const reg = loadRegistry();
-  reg[key] = {
-    scwAddress,
-    sessionKeyAddress: sessionKeyAddress ?? null,
-    ...(sessionKeyEnc ? { sessionKeyEnc } : {}),
-    createdAt: reg[key]?.createdAt ?? new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+  const prev = reg[key] ?? {};
+  if (ownerEoa) {
+    // v2 record — the EOA is the owner; no key material is stored at derive time
+    reg[key] = {
+      schema: 2,
+      scwAddress,
+      ownerEoa: ownerEoa.toLowerCase(),
+      salt: salt ?? 0,
+      sessionKeyAddress: sessionKeyAddress ?? prev.sessionKeyAddress ?? null,
+      sessionKeyEnc: sessionKeyEnc ?? prev.sessionKeyEnc ?? null,
+      grantStatus: grantStatus ?? prev.grantStatus ?? "none",
+      createdAt: prev.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  } else {
+    // v1 record — legacy session-key-owned account (never converts a v2 record)
+    reg[key] = {
+      scwAddress,
+      sessionKeyAddress: sessionKeyAddress ?? prev.sessionKeyAddress,
+      ...(sessionKeyEnc ? { sessionKeyEnc } : {}),
+      createdAt: prev.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (prev.schema === 2) reg[key].schema = 2; // preserve the v2 marker on key-only updates
+  }
   saveRegistry(reg);
   return true;
 }

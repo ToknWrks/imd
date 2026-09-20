@@ -9,7 +9,7 @@ const MAP = {
   "smart-account.mjs": "smart-account.stub.mjs",
   "signer.mjs": "signer.stub.mjs",
   "users.mjs": "users.stub.mjs",
-  "smart-wallet-registry.mjs": "smart-wallet-registry.stub.mjs",
+  "smart-wallet-registry.mjs": "registry-v2.stub.mjs",
   "db.mjs": "db.stub.mjs",
   "dip-swap.mjs": "dip-swap.stub.mjs",
   "chains.mjs": "chains.stub.mjs",

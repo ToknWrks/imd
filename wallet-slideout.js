@@ -199,7 +199,58 @@ function _swCopyFallback(text, done) {
 function renderSmartWalletSection(){
   var s=_swState; if(!s)return;
   var scw=s.scw||{}, owner=s.owner||{};
-  // NO SESSION KEY (2026-09-19): never show a smart-wallet card with a
+  // ── v2 wallet (user-EOA-owned, plan 2026-09-20): the "no session key" branch
+  // now shows the user's OWN counterfactual SCW (owner = their EOA) with a
+  // one-click browser-signed Activate. No key to generate, nothing to back up.
+  if(s.schema===2){
+    var ethUsd2=s.ethUsd||0;
+    var imdPerEth2=s.imdPerEth||0;
+    var imdUsd2=imdPerEth2>0?ethUsd2/imdPerEth2:0;
+    var activated2=scw&&scw.activated;
+    var browserWallet2=_wcAddress||null;
+    var h2='';
+    h2+='<div class="sw-head">Smart wallet <span class="hint">'+(activated2?'\u2713 deployed':'yours — 1 click to activate')+'</span></div>';
+    h2+='<div class="sw-grid">';
+    // Connected wallet card (owner)
+    h2+='<div class="sw-card"><div class="sw-card-title">Your wallet <span class="hint">owner</span></div>';
+    h2+=_swAddrRow(_wcAddress||owner.address);
+    h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(owner.eth)+'</span>'+usd(owner.eth!=null?owner.eth*ethUsd2:null)+'</div>';
+    if(browserWallet2){
+      h2+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
+      h2+=swHintRow('swInEthHint');
+      h2+='<div class="hint" style="margin-top:0.4rem;font-size:0.68rem">Funding signs in your browser wallet \u2014 keys never leave it.</div>';
+    }
+    h2+='</div>';
+    // SCW card (user-EOA-owned)
+    h2+='<div class="sw-card"><div class="sw-card-title">Smart wallet <span class="hint">'+_we(s.custodyLabel||'your EOA owns it')+'</span></div>';
+    h2+=_swAddrRow(scw&&scw.address);
+    h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw&&scw.eth)+'</span>'+usd(scw&&scw.eth!=null?scw.eth*ethUsd2:null)+'</div>';
+    // Move-out is browser-signed for v2 (owner EOA sends directly)
+    if(browserWallet2){
+      h2+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('eth')" + '">\u2190 Move out</button></div>';
+      h2+=swHintRow('swOutEthHint');
+      h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Sweep = sign in your wallet; the SCW \u2192 your EOA transfer rides inside the same tx.</div>';
+    }
+    h2+='<div class="sw-status" id="swStatus"></div>';
+    h2+='<div style="margin-top:0.6rem">';
+    if(!activated2){h2+='<button class="sw-btn activate" onclick="swActivateV2()">Activate smart wallet</button>';}
+    else{
+      h2+='<span class="hint">\u2713 deployed on-chain';
+      if(s.grantStatus==='granted'){h2+=' \u00b7 \u2713 automation on (session key active)';}
+      else if(s.grantStatus==='pending'){h2+=' \u00b7 grant pending \u2014 finish it below';}
+      else{h2+=' \u2014 co-pilot mode';}
+      h2+='</span>';
+      if(browserWallet2&&s.grantStatus!=='granted'){
+        h2+='<div style="margin-top:0.5rem"><button class="sw-btn alt" onclick="swGrantAutonomy()">'+(s.grantStatus==='pending'?'Finish grant (sign in wallet)':'Enable automated trading')+'</button></div>';
+        h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Adds the app\u2019s session key as an operator of THIS wallet (one signed tx, \u22480.003 ETH gas). Skip it to stay in co-pilot \u2014 no key is ever stored until you do.</div>';
+      }
+    }
+    h2+='</div></div>';
+    h2+='</div>';
+    document.getElementById('smartWalletSection').innerHTML=h2;
+    return;
+  }
+  // NO SESSION KEY (2026-09-19, v1 wallets only): never show a smart-wallet card with a
   // fundable address — the only wallet the server could previously show here
   // was a global env burner that belongs to nobody. Co-pilot users see an
   // explicit explanation + path to autonomy instead.
@@ -446,6 +497,164 @@ async function swActivate(){
   }
 }
 function closeWallet(){document.getElementById('walletOverlay').classList.remove('open');}
+// ── v2 (user-EOA-owned) actions ──────────────────────────────────────────────
+// Activate: server quotes the factory deploy; the BROWSER signs it. One click,
+// owner-paid — no gas-key funding (your EOA is the owner by construction).
+async function swActivateV2(){
+  var btn=event&&event.target;
+  if(btn){btn.disabled=true;btn.textContent='Activating…';}
+  _swStatus('preparing deploy…',true);
+  try{
+    var r=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
+    var j=await r.json();
+    if(!j.ok)throw new Error(j.error||'activate failed');
+    if(j.alreadyDeployed){_swStatus('\u2713 already deployed');setTimeout(function(){openWallet();},1200);return;}
+    if(!j.browserSign)throw new Error('unexpected activation payload');
+    _swStatus('signing the deploy in your wallet…',true);
+    var accts=await window.ethereum.request({method:'eth_requestAccounts'});
+    var from=accts&&accts[0];
+    if(!from){_swStatus('no account active in your wallet',false,true);return;}
+    var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:from,to:j.factory,data:j.callData,value:'0x0',chainId:chainIdHexFor(_swState.chain),gas:'0x'+Number(j.gasEstimate||200000).toString(16)}]});
+    _swStatus('\u2713 deploy sent — tx '+(txHash||'').slice(0,10)+'… verifying…',true);
+    // Poll for code at the SCW (max ~90s), mirroring the server-side guard.
+    var deadline=Date.now()+90000;
+    while(Date.now()<deadline){
+      await new Promise(function(res){setTimeout(res,4000);});
+      try{
+        var chk=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,from:_wcAddress||null,checkOnly:true})});
+        var cj=await chk.json();
+        if(cj.alreadyDeployed){_swStatus('\u2713 smart wallet deployed — it is YOUR wallet now');setTimeout(function(){openWallet();},1500);return;}
+      }catch{}
+    }
+    _swStatus('deploy not confirmed yet — click Activate again in a moment',false,true);
+    if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
+  }catch(e){
+    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);}
+    else _swStatus(String(e.message||e).slice(0,180),false,true);
+    if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
+  }
+}
+// ── v2 browser-submitted UOs (plan refinement 2026-09-20) ────────────────────
+// The BROWSER submits handleOps itself (eth_sendTransaction): the user's EOA
+// pays the relay gas from its own balance. No server relayer, no shared gas
+// liability — the server only quotes calldata + the digest to sign. UO gas is
+// refunded by the EntryPoint from the SCW's prefund (AA semantics).
+// _padW: words/addresses RIGHT-aligned (ABI default). dataWL: dynamic bytes
+// LEFT-aligned + zero-padded to nBytes. Both accept 0x-prefixed or bare hex.
+var _padW=function(h,n){h=String(h||'0x');if(h.slice(0,2)!=='0x')h='0x'+h;h=h.slice(2);while(h.length<n*2)h='0'+h;return h;};
+var dataWL=function(hex,nBytes){hex=hex||'';while(hex.length<nBytes*2)hex=hex+'0';return hex;};
+// Sign the UO digest in the browser and submit handleOps from the user's EOA.
+// quote = server payload (userOp, digestToSign, entryPoint).
+async function swSignAndSubmit(quote,label){
+  _swStatus('signing in your wallet…',true);
+  var accts=await window.ethereum.request({method:'eth_requestAccounts'});
+  var from=accts&&accts[0];
+  if(!from)throw new Error('no account active in your wallet');
+  var sig=await window.ethereum.request({method:'personal_sign',params:[quote.digestToSign,from]});
+  // normalize v (some wallets return 0/1)
+  var v=parseInt(sig.slice(-2),16);
+  if(v===0||v===1)sig=sig.slice(0,-2)+(v+27).toString(16).padStart(2,'0');
+  var uo=quote.userOp;
+  uo.signature='0xFF00'+sig.slice(2); // packUOSignature: non-global entity format
+  uo.accountGasLimits=_padW(uo.verificationGasLimit,16)+_padW(uo.callGasLimit,16);
+  uo.gasFees=_padW(uo.maxPriorityFeePerGas,16)+_padW(uo.maxFeePerGas,16);
+  var data=swHandleOpsData(uo,from);
+  var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:from,to:quote.entryPoint,data:data,chainId:chainIdHexFor(_swState.chain),gas:'0x'+Number(1200000).toString(16)}]});
+  return txHash;
+}
+// Encode handleOps([struct], beneficiary) — byte-verified against viem's encoder
+// for the real EP 0.7 ABI across six cases (empty/non-empty initCode, paymaster,
+// odd-length callData, 2^72 nonce, packed signature). Layout:
+//   head: arrayOffset(0x40), beneficiary, arrayLen(1), elementOffset(0x20)
+//   tuple: sender, nonce, initCodeOff, callDataOff, accountGasLimits(bytes32),
+//          preVerificationGas, gasFees(bytes32), pmOff, sigOff
+//          (dynamic offsets relative to tuple start; tuple fixed area = 9 words)
+//   tails: each dynamic member = length word + left-aligned data words
+function swHandleOpsData(uo,beneficiary){
+  var ic=(uo.initCode||'0x').slice(2), cd=uo.callData.slice(2),
+      pm=(uo.paymasterAndData||'0x').slice(2), sig=uo.signature.slice(2);
+  var tW=function(hex){return 32+Math.ceil(hex.length/64)*32;}; // tail bytes
+  var icT=tW(ic), cdT=tW(cd), pmT=tW(pm), sigT=tW(sig);
+  var icOff=9*32, cdOff=icOff+icT, pmOff=cdOff+cdT, sigOff=pmOff+pmT;
+  var lenWord=function(hex){return _padW('0x'+(hex.length/2).toString(16),32);};
+  return '0x765e827f' // handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)
+    +_padW('0x40',32)
+    +_padW(beneficiary,32)
+    +_padW('0x1',32)
+    +_padW('0x20',32)
+    +_padW(uo.sender,32)
+    +_padW(uo.nonce,32)
+    +_padW('0x'+icOff.toString(16),32)
+    +_padW('0x'+cdOff.toString(16),32)
+    +_padW(uo.accountGasLimits,32)
+    +_padW(uo.preVerificationGas,32)
+    +_padW(uo.gasFees,32)
+    +_padW('0x'+pmOff.toString(16),32)
+    +_padW('0x'+sigOff.toString(16),32)
+    +lenWord(ic)+dataWL(ic,icT-32)
+    +lenWord(cd)+dataWL(cd,cdT-32)
+    +lenWord(pm)+dataWL(pm,pmT-32)
+    +lenWord(sig)+dataWL(sig,sigT-32);
+}
+// Move-out for v2: the OWNER signs a sweep UO (SCW → their EOA) and submits it
+// from their own wallet — pays its own gas, works pre-grant (owner entity
+// validates the UO, no session key involved).
+async function swMoveOutBrowser(asset){
+  var input=document.getElementById(asset==='eth'?'swOutEth':'swOutImd');
+  if(!input||!_swState)return;
+  var amount=parseFloat(input.value);
+  if(!(amount>0)){_swStatus('enter an amount',false,true);return;}
+  if(!window.ethereum||!_wcAddress){_swStatus('connect your wallet first',false,true);return;}
+  _swStatus('preparing the sweep…',true);
+  try{
+    var r=await fetch('/api/smart-wallet/move-out-v2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,asset:asset,amount:amount,from:_wcAddress})});
+    var j=await r.json();
+    if(!j.ok)throw new Error(j.error||'sweep quote failed');
+    if(!j.digestToSign)throw new Error('sweep payload missing digest');
+    _swStatus('signing the sweep in your wallet…',true);
+    var txHash=await swSignAndSubmit(j,'sweep');
+    _swStatus('\u2713 sent — tx '+(txHash||'').slice(0,10)+'… reloading…');
+    setTimeout(function(){openWallet();},2200);
+  }catch(e){
+    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);return;}
+    _swStatus(String(e.message||e).slice(0,160),false,true);
+  }
+}
+// Autonomy grant: quote → browser signs the digest → browser submits handleOps.
+async function swGrantAutonomy(){
+  var btn=event&&event.target;
+  if(btn){btn.disabled=true;btn.textContent='Preparing grant…';}
+  _swStatus('preparing the grant transaction…',true);
+  try{
+    var r=await fetch('/api/smart-wallet/grant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
+    var j=await r.json();
+    if(!j.ok)throw new Error(j.error||'grant quote failed');
+    if(!j.digestToSign)throw new Error('grant payload missing digest');
+    _swStatus('signing the grant in your wallet…',true);
+    var txHash=await swSignAndSubmit(j,'grant');
+    _swStatus('\u2713 grant sent — automation lands when the tx mines…',true);
+    // Poll status until grantStatus flips (the server reads the chain, not our word)
+    var deadline=Date.now()+180000;
+    while(Date.now()<deadline){
+      await new Promise(function(res){setTimeout(res,6000);});
+      try{
+        var c=await fetch('/api/smart-wallet/grant/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain})});
+        var cj=await c.json();
+        if(cj.ok&&cj.grantStatus==='granted'){
+          _swStatus('\u2713 automation enabled — the app can now trade from your smart wallet');
+          setTimeout(function(){openWallet();},1800);
+          return;
+        }
+      }catch{}
+    }
+    _swStatus('grant submitted — automation activates when the tx lands',false,true);
+    if(btn){btn.disabled=false;btn.textContent='Finish grant (sign in wallet)';}
+  }catch(e){
+    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);}
+    else _swStatus(String(e.message||e).slice(0,180),false,true);
+    if(btn){btn.disabled=false;btn.textContent='Enable automated trading';}
+  }
+}
 async function refreshWallet(btn){
   var svg=btn.querySelector('svg');
   if(svg){svg.style.transition='transform 0.6s linear';svg.style.transform='rotate(360deg)';setTimeout(function(){svg.style.transition='none';svg.style.transform='rotate(0deg)';},650);}

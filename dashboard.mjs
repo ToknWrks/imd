@@ -2362,7 +2362,35 @@ const server = createServer(async (req, res) => {
         return json(await moveFunds({
           direction: body.direction, asset: body.asset || "eth",
           amount: body.amount, chainKey: body.chain || "ethereum",
+          userId: sessionAddress(req),
         }));
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    // v2 autonomy grant (plan 2026-09-20): quote the installValidation UO for
+    // the browser owner to sign, then flip the record once it lands.
+    if (url === "/api/smart-wallet/grant" && method === "POST") {
+      try {
+        const { chain, from } = JSON.parse(await readBody() || "{}");
+        const { grantSessionKeyForOwner } = await import("./smart-wallet-api.mjs");
+        return json(await grantSessionKeyForOwner(sessionAddress(req), chain || "ethereum", { browserFrom: from || null }));
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    if (url === "/api/smart-wallet/grant/confirm" && method === "POST") {
+      try {
+        const { chain } = JSON.parse(await readBody() || "{}");
+        const { confirmGrant } = await import("./smart-wallet-api.mjs");
+        return json(await confirmGrant(sessionAddress(req), chain || "ethereum"));
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    // Note: the grant/sweep UOs are submitted by the BROWSER (eth_sendTransaction
+    // of handleOps — user's EOA pays relay gas). The old server-relay submit
+    // endpoints were removed; the server's remaining role is quoting + confirming.
+    // v2 sweep (SCW → browser EOA): quote the owner-signed UO.
+    if (url === "/api/smart-wallet/move-out-v2" && method === "POST") {
+      try {
+        const { chain, asset, amount, from } = JSON.parse(await readBody() || "{}");
+        const { quoteMoveOutV2 } = await import("./smart-wallet-api.mjs");
+        return json(await quoteMoveOutV2(sessionAddress(req), chain || "ethereum", { asset: asset || "eth", amount, browserFrom: from || null }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
 

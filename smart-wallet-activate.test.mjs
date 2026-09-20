@@ -16,6 +16,13 @@ const STUBS = {
     export const gasReserveWei = () => 0n;
     export function invalidateSmartAccountClient() {}
     export function explainUserOpError(e) { return String(e); }
+    export const MAV2_FACTORY = "0x" + "1".repeat(40);
+    export const SMAV2_IMPL = "0x" + "2".repeat(40);
+    export const ENTRY_POINT_V7 = "0x" + "3".repeat(40);
+    export function predictEoaOwnedScwAddress(chainKey, eoa) { return "0x" + "d".repeat(40); }
+    export function ssvModuleAddress() { return "0x" + "e".repeat(40); }
+    export function userOpDigest(chainKey, userOp) { return "0x" + "f".repeat(64); }
+    export function packUOSignature(sig) { return "0xFF00" + sig; }
     // PRODUCTION SHAPE: the Alchemy client does NOT expose account.owner
     // (verified live 2026-09-19 — the guard fired on the first activation).
     // The owner must come from the registry session key instead.
@@ -51,6 +58,7 @@ const STUBS = {
     import { privateKeyToAccount } from "viem/accounts";
     // A deterministic session key; the test expects its EOA as owner.
     const SK = "0x" + "1".repeat(64);
+    export function isV2Record() { return false; }
     export function getWalletRecord() {
       return {
         scwAddress: "0x" + "9".repeat(40),
@@ -61,6 +69,38 @@ const STUBS = {
     export function setWalletRecord() {}
   `,
 };
+
+// The loader hook maps smart-wallet-registry.mjs → registry-v2.stub.mjs (shared
+// with the v2 test, which also writes that file). Use the SAME in-memory-store
+// shape as the v2 test so both suites coexist regardless of run order; preload
+// this test's v1 record for the probe user.
+const SK_CONST = 'const SK = "0x" + "1".repeat(64);';
+STUBS["registry-v2.stub.mjs"] = `
+    import { privateKeyToAccount } from "viem/accounts";
+    ${SK_CONST}
+    // v1 record preloaded for the activate test's probe user.
+    const store = {
+      ${JSON.stringify("0x" + "2".repeat(40))}: {
+        scwAddress: ${JSON.stringify("0x" + "9".repeat(40))},
+        sessionKeyAddress: privateKeyToAccount(SK).address,
+        sessionKeyEnc: "enc:" + SK,
+      },
+    };
+    export function isV2Record(rec) { return Boolean(rec && rec.schema === 2 && rec.ownerEoa); }
+    export function getWalletRecord(addr) { return store[(addr || "").toLowerCase()] ?? null; }
+    export function setWalletRecord(addr, rec) {
+      const k = (addr || "").toLowerCase();
+      const prev = store[k] ?? {};
+      if (rec && rec.ownerEoa) {
+        store[k] = { ...prev, ...rec, schema: 2, sessionKeyAddress: rec.sessionKeyAddress ?? prev.sessionKeyAddress ?? null, sessionKeyEnc: rec.sessionKeyEnc ?? prev.sessionKeyEnc ?? null, createdAt: prev.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() };
+      } else {
+        store[k] = { ...prev, ...rec, createdAt: prev.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() };
+      }
+      return true;
+    }
+    export function listWallets() { return Object.entries(store).map(([connectedWallet, rec]) => ({ connectedWallet, ...rec })); }
+    export function __store() { return store; }
+  `;
 
 // The loader writes a register()-based entrypoint that points at the hook file
 // (already maintained by hand at scripts/test-loader-hook.mjs). Node 22 needs

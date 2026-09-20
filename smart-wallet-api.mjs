@@ -24,10 +24,10 @@
 import { getChain, getEthUsdPriceFor } from "./chains.mjs";
 import { getErc20Balance, getImdPerEth } from "./dip-swap.mjs";
 import { resolveSigner, invalidateSigner } from "./signer.mjs";
-import { getSmartAccountClient, invalidateSmartAccountClient, gasReserveWei, explainUserOpError } from "./smart-account.mjs";
-import { createPublicClient, http, getAddress, encodeFunctionData, parseAbi, formatEther, formatUnits, parseUnits } from "viem";
+import { getSmartAccountClient, invalidateSmartAccountClient, gasReserveWei, explainUserOpError, predictEoaOwnedScwAddress, ssvModuleAddress, MAV2_FACTORY, userOpDigest, packUOSignature, ENTRY_POINT_V7 } from "./smart-account.mjs";
+import { createPublicClient, http, getAddress, encodeFunctionData, parseAbi, formatEther, formatUnits, parseUnits, concat, padHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { getWalletRecord, setWalletRecord } from "./smart-wallet-registry.mjs";
+import { getWalletRecord, setWalletRecord, isV2Record } from "./smart-wallet-registry.mjs";
 
 const ERC20_ABI = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
 
@@ -43,6 +43,27 @@ export async function ensureWalletSession(connectedAddress, chainKey = "ethereum
     throw new Error("invalid connected wallet address");
   }
   const rec = getWalletRecord(connectedAddress);
+
+  // ── v2 record (user-EOA-owned SCW, plan 2026-09-20): reuse the stored address.
+  // No session key exists yet (or a granted one does — sessionKeyEnc filled by
+  // the grant flow). The SCW is deterministic from the EOA, so there is nothing
+  // to re-derive and nothing that can orphan funds here.
+  if (rec && isV2Record(rec)) {
+    if (rec.sessionKeyEnc) {
+      // Post-grant wallet: mirror the v1 path so AA_SESSION_KEY keeps working.
+      const sk = decryptSessionKey(rec.sessionKeyEnc);
+      if (!sk) {
+        console.error(`[wallet-session] ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}: v2 session key UNREADABLE — refusing to mint (funds-safety guard).`);
+        throw new Error("Stored session key unreadable — refusing to mint a new wallet (funds-safety guard). Check MASTER_KEY / data/connected-wallets.json.");
+      }
+      process.env.AA_SESSION_KEY = sk;
+      invalidateSmartAccountClient(chainKey);
+      return { ok: true, created: false, scwAddress: getAddress(rec.scwAddress), sessionKeyAddress: rec.sessionKeyAddress, schema: 2 };
+    }
+    // sessionKeyEnc: null → co-pilot-only v2 wallet: the SCW address is known
+    // (user funds it + activates in the browser); no server key to mint.
+    return { ok: true, created: false, scwAddress: getAddress(rec.scwAddress), sessionKeyAddress: null, schema: 2, needsActivate: true };
+  }
 
   // Known wallet → reuse its stored key (this is why switching back restores
   // that wallet's smart wallet). Key is encrypted at rest (MASTER_KEY);
@@ -72,34 +93,29 @@ export async function ensureWalletSession(connectedAddress, chainKey = "ethereum
     return { ok: true, created: false, scwAddress: getAddress(client.account.address), sessionKeyAddress: rec.sessionKeyAddress };
   }
 
-  // A record exists but WITHOUT a key (key was lost / file truncated): same
+  // A v1 record exists but WITHOUT a key (key was lost / file truncated): same
   // guard — the SCW address is known and may hold funds, so do not re-derive.
+  // (v2 records never reach this line — handled above.)
   if (rec && !rec.sessionKeyEnc) {
     console.error(`[wallet-session] ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}: registry record for SCW ${rec.scwAddress} has NO session key — refusing to generate a new wallet.`);
     throw new Error(`Smart wallet ${rec.scwAddress} is registered but its session key is missing — refusing to mint a new wallet (funds-safety guard).`);
   }
 
-  // New wallet → generate a fresh session key, derive its SCW, record it.
-  const { generatePrivateKey } = await import("viem/accounts");
-  const sessionKey = generatePrivateKey();
-  const sessionKeyAddress = getAddress(privateKeyToAccount(sessionKey).address);
-  const prev = process.env.AA_SESSION_KEY;
-  process.env.AA_SESSION_KEY = sessionKey;
-  invalidateSmartAccountClient(chainKey);
-  try {
-    const client = await getSmartAccountClient(chainKey);
-    const scwAddress = getAddress(client.account.address);
+  // ── NEW WALLET (plan 2026-09-20): derive the SCW from the user's EOA (v2).
+  // No session key is generated here — the account will be owned by the EOA,
+  // activated with one browser-signed factory tx, and the session key is only
+  // minted when the user grants autonomy (grantSessionKeyForOwner). This kills
+  // the "backup key" story: the wallet IS the user's EOA.
+  {
+    const scwAddress = predictEoaOwnedScwAddress(chainKey, connectedAddress);
     setWalletRecord(connectedAddress, {
       scwAddress,
-      sessionKeyAddress,
-      sessionKeyEnc: encryptSessionKey(sessionKey), // encrypted at rest (MASTER_KEY)
+      ownerEoa: connectedAddress,
+      salt: 0,
+      grantStatus: "none",
     });
-    return { ok: true, created: true, scwAddress, sessionKeyAddress };
-  } catch (e) {
-    // restore the previous key if creation failed
-    if (prev) process.env.AA_SESSION_KEY = prev;
-    invalidateSmartAccountClient(chainKey);
-    throw e;
+    console.log(`[wallet-session] ${connectedAddress.slice(0, 6)}…${connectedAddress.slice(-4)}: v2 SCW derived ${scwAddress} (owner = user EOA; activate in browser)`);
+    return { ok: true, created: true, scwAddress, sessionKeyAddress: null, schema: 2, needsActivate: true };
   }
 }
 
@@ -139,9 +155,12 @@ function decryptSessionKey(stored) {
  */
 export async function resolveUserReadWallet(userId, chainKey = "ethereum") {
   // 1. Registry SCW for this user (the per-connected-wallet trading wallet).
+  //    v2 records (user-EOA-owned) carry the SCW address directly — no key
+  //    needed to read it. v1 records decrypt the stored session key first.
   if (userId && /^0x[0-9a-fA-F]{40}$/.test(userId)) {
     try {
       const rec = getWalletRecord(userId);
+      if (rec && isV2Record(rec)) return getAddress(rec.scwAddress);
       if (rec?.sessionKeyEnc) {
         const sk = decryptSessionKey(rec.sessionKeyEnc);
         if (sk) {
@@ -186,7 +205,10 @@ export async function resolveUserReadWallets(userId, chainKey = "ethereum") {
   if (userId && /^0x[0-9a-fA-F]{40}$/.test(userId)) {
     try {
       const rec = getWalletRecord(userId);
-      if (rec?.sessionKeyEnc) {
+      if (rec && isV2Record(rec)) {
+        // v2: SCW straight from the record (works pre- and post-grant).
+        push(rec.scwAddress);
+      } else if (rec?.sessionKeyEnc) {
         const sk = decryptSessionKey(rec.sessionKeyEnc);
         if (sk) {
           const client = await getSmartAccountClient(chainKey, { sessionKey: sk });
@@ -319,6 +341,40 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
   // Same `uid` also drives the owner card below — one source of truth
   // (the signed session), not a client-submitted address.
   const uid = sessionAddrFn && req ? sessionAddrFn(req) : null;
+
+  // ── v2 records (user-EOA-owned): the SCW address lives in the registry; no
+  // session key is needed to read balances. Emit the fields the v2 UI branch
+  // consumes (schema, grantStatus, custodyLabel) and read the SCW directly.
+  const rec = uid ? getWalletRecord(uid) : null;
+  if (rec && isV2Record(rec)) {
+    const scwAddress = getAddress(rec.scwAddress);
+    const pub = await publicClientFor(chainKey);
+    const [ethWei, code, dollarRaw] = await Promise.all([
+      pub.getBalance({ address: scwAddress }).catch(() => 0n),
+      pub.getCode({ address: scwAddress }).catch(() => "0x"),
+      getErc20Balance(getChain(chainKey).dollar, scwAddress, chainKey).catch(() => null),
+    ]);
+    return {
+      ok: true,
+      chain: chainKey,
+      schema: 2,
+      custodyLabel: "your EOA owns it",
+      grantStatus: rec.grantStatus || "none",
+      ownerEoa: getAddress(rec.ownerEoa),
+      hasSessionKey: Boolean(rec.sessionKeyEnc),
+      scw: {
+        address: scwAddress,
+        eth: Number(ethWei) / 1e18,
+        activated: Boolean(code && code !== "0x"),
+        usd: null,
+      },
+      gasReserveEth: Number(gasReserveWei(chainKey)) / 1e18,
+      dollarSymbol: dollarSymbol(chainKey),
+      dollarToken: getChain(chainKey).dollar,
+      imdToken: getChain(chainKey).imdToken || null,
+    };
+  }
+
   let userSessionKey = null;
   let hasSessionKey = false;
   try {
@@ -383,19 +439,57 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
   return out;
 }
 
-/** POST /api/smart-wallet/activate — factory deploy signed BY THE SESSION KEY.
- *  WHO SIGNS: the account OWNER = the session-key EOA (Phase 1 design). The
- *  MA v2 factory SILENTLY NO-OPS when msg.sender ≠ owner (CLAUDE.md:
- *  "UO construction succeeded ≠ deploy path works" — cost 0.0008 ETH to learn;
- *  confirmed live again 2026-09-19: a browser-signed deploy from the user's
- *  EOA succeeded on-chain with 25.5k gas, zero logs, no code deployed). So the
- *  deploy is sent server-side WITH THE USER'S SESSION KEY (decrypted via
- *  MASTER_KEY) — msg.sender = owner, gas paid from the session-key EOA, and
- *  the UI tells the user to fund THAT address. `browserFrom` is accepted for
- *  API compat but signing never happens in the browser for activation. */
+/** POST /api/smart-wallet/activate.
+ *
+ *  v2 wallets (user-EOA-owned, plan 2026-09-20): returns an UNSIGNED factory
+ *  payload for the BROWSER to sign (eth_sendTransaction) — the owner IS the
+ *  browser EOA, so msg.sender == owner by construction and the deploy is one
+ *  owner-paid click (fork-verified 2026-09-20: 97,772 gas, code lands at the
+ *  predicted address). No gas-key funding dance.
+ *
+ *  v1 wallets (legacy): the session key owns the account and the factory
+ *  silently no-ops for anyone else (0.0008 ETH lesson), so the deploy is signed
+ *  server-side with the user's registry session key — unchanged legacy flow. */
 export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null, userId = null, checkOnly = false } = {}) {
   const dep = getChain(chainKey);
   const pub = await publicClientFor(chainKey);
+
+  // ── v2 branch: derive from the registry record (owner = the connected EOA).
+  const rec = userId ? getWalletRecord(userId) : null;
+  if (rec && isV2Record(rec)) {
+    const address = getAddress(rec.scwAddress);
+    const ownerEoa = getAddress(rec.ownerEoa);
+    const code = await pub.getCode({ address }).catch(() => "0x");
+    if (code && code !== "0x") return { ok: true, alreadyDeployed: true, address, schema: 2 };
+    if (browserFrom && getAddress(browserFrom).toLowerCase() !== ownerEoa.toLowerCase()) {
+      throw new Error(`activation must be signed by the wallet's owner ${ownerEoa} (got ${getAddress(browserFrom)})`);
+    }
+    const factoryAbi = parseAbi(["function createSemiModularAccount(address owner, uint256 salt) returns (address)"]);
+    const callData = encodeFunctionData({
+      abi: factoryAbi,
+      functionName: "createSemiModularAccount",
+      args: [ownerEoa, BigInt(rec.salt ?? 0)],
+    });
+    // Browser signs; server only prepares + verifies. checkOnly is honored for
+    // API compat (pollers) — it just reports readiness, never deploys.
+    if (checkOnly) {
+      return { ok: true, checkOnly: true, browserSign: true, schema: 2, factory: MAV2_FACTORY, owner: ownerEoa, scwAddress: address, callData, chainId: dep.viemChain.id ?? 1 };
+    }
+    return {
+      ok: true,
+      browserSign: true,
+      schema: 2,
+      factory: MAV2_FACTORY,
+      owner: ownerEoa,
+      scwAddress: address,
+      callData,
+      chainId: dep.viemChain.id ?? 1,
+      gasEstimate: 200000,
+      message: "Sign the deploy in your browser wallet — your EOA is the owner, so this single tx activates the wallet.",
+    };
+  }
+
+  // ── v1 legacy branch (session-key-owned MultiOwnerLightAccount) — unchanged.
   const scw = await getSmartAccountClient(chainKey);
   const address = getAddress(scw.account.address);
 
@@ -456,6 +550,295 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
   const codeAfter = await pub.getCode({ address }).catch(() => "0x");
   if (!codeAfter || codeAfter === "0x") throw new Error("deploy tx mined but no code at " + address + " — factory no-oped (msg.sender ≠ owner?)");
   return { ok: true, address, txHash };
+}
+
+/**
+ * v2 AUTONOMY GRANT (plan 2026-09-20, refined sequencing): generate the user's
+ * session key, store it encrypted, and return the installValidation UO payload
+ * for the BROWSER (owner EOA) to sign and submit via the EntryPoint. The grant
+ * rides entity 1 (SingleSignerValidationModule) with selectors
+ * [execute, executeBatch] — exactly the shape proven on the 2026-09-20 fork
+ * dry run (session-key-only UO mined and transferred).
+ *
+ * The UO signature is NOT the 1271-packed owner format: for a non-global entity
+ * the account validates a raw `0xFF 0x00 <ecdsa>` signature over the userOpHash
+ * (verified live — packUOSignature shape).
+ *
+ * The caller (UI) submits handleOps with the browser's signature; then calls
+ * confirmGrant() to record grantStatus + AA_SESSION_KEY. Co-pilot users never
+ * call this — no key is generated, nothing to back up.
+ */
+export async function grantSessionKeyForOwner(userId, chainKey = "ethereum", { browserFrom = null } = {}) {
+  if (!userId || !/^0x[0-9a-fA-F]{40}$/.test(userId)) throw new Error("userId required");
+  const rec = getWalletRecord(userId);
+  if (!rec || !isV2Record(rec)) throw new Error("no v2 smart wallet registered for this user — connect the wallet first");
+  const ownerEoa = getAddress(rec.ownerEoa);
+  if (browserFrom && getAddress(browserFrom).toLowerCase() !== ownerEoa.toLowerCase()) {
+    throw new Error(`the grant must be signed by the wallet owner ${ownerEoa}`);
+  }
+  const scwAddress = getAddress(rec.scwAddress);
+  const pub = await publicClientFor(chainKey);
+  const code = await pub.getCode({ address: scwAddress }).catch(() => "0x");
+  if (!code || code === "0x") throw new Error("smart wallet is not deployed yet — activate it first (the grant UO's sender must exist on-chain)");
+
+  // Reuse an already-generated key (idempotent re-quotes); mint only if absent.
+  let sessionKey = rec.sessionKeyEnc ? decryptSessionKey(rec.sessionKeyEnc) : null;
+  let generated = false;
+  if (!sessionKey) {
+    const { generatePrivateKey } = await import("viem/accounts");
+    sessionKey = generatePrivateKey();
+  }
+  const sessionKeyAddress = getAddress(privateKeyToAccount(sessionKey).address);
+
+  // Persist the key NOW (encrypted at rest) + record grantStatus "pending".
+  // A crash between quote and submit must not orphan the key.
+  setWalletRecord(userId, {
+    scwAddress: rec.scwAddress,
+    ownerEoa,
+    salt: rec.salt,
+    sessionKeyAddress,
+    sessionKeyEnc: encryptSessionKey(sessionKey),
+    grantStatus: "pending",
+  });
+
+  // Build the installValidation self-execute calldata (entity 1, selectors
+  // execute + executeBatch, signer = session-key EOA). Verified encoding —
+  // see scripts/.dryrun-sessionkey.mjs (grant leg, ValidationFunctionMissing fix).
+  const ssv = ssvModuleAddress(chainKey);
+  const validationConfig = concat([ssv, toHex(1, { size: 4 }), toHex(0x01, { size: 1 })]); // isUserOpValidation only
+  const callData = encodeFunctionData({
+    abi: parseAbi(["function execute(address target, uint256 value, bytes data)"]),
+    functionName: "execute",
+    args: [
+      scwAddress,
+      0n,
+      encodeFunctionData({
+        abi: parseAbi(["function installValidation(bytes25 validationConfig, bytes4[] selectors, bytes installData, bytes[] hooks)"]),
+        functionName: "installValidation",
+        args: [
+          validationConfig,
+          ["0xb61d27f6", "0x34fcd5be"], // execute, executeBatch
+          encodeAbiParameters([{ type: "uint32" }, { type: "address" }], [1, sessionKeyAddress]),
+          [],
+        ],
+      }),
+    ],
+  });
+
+  const EP = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+  const pubEp = getContract({ address: EP, abi: parseAbi(["function getNonce(address sender, uint192 key) view returns (uint256)"]), client: pub });
+  // Entity-1, non-global nonce key = (0 << 40) | (1 << 8) | 0 = 256
+  const nonce = await pubEp.read.getNonce([scwAddress, 256n]);
+
+  const userOp = {
+    sender: scwAddress,
+    nonce: "0x" + nonce.toString(16),
+    initCode: "0x",
+    callData,
+    verificationGasLimit: "0x" + (400000).toString(16),
+    callGasLimit: "0x" + (400000).toString(16),
+    preVerificationGas: "0x" + (120000).toString(16),
+    maxFeePerGas: "0x" + (30_000_000_000n).toString(16),
+    maxPriorityFeePerGas: "0x" + (1_000_000_000n).toString(16),
+    paymasterAndData: "0x",
+    // signature: the BROWSER owner signs userOpDigest(userOp) and the UI sends
+    // the raw 65-byte personal_sign result; the submit endpoint packs it with
+    // packUOSignature → "0xFF00"+sig. No 1271 packing for non-global entities.
+    signature: "SIGN_IN_BROWSER",
+  };
+  const { userOpDigest } = await import("./smart-account.mjs");
+  const digestToSign = userOpDigest(chainKey, userOp);
+
+  return {
+    ok: true,
+    browserSign: true,
+    schema: 2,
+    entryPoint: EP,
+    userOp,
+    digestToSign,
+    sessionKeyAddress,
+    gasEstimateEth: 0.003,
+    message: "Sign the grant in your browser wallet — this adds the app's session key as an operator that can trade from your smart wallet.",
+  };
+}
+
+/**
+ * Submit the browser-signed grant UO: verify the signature recovers the OWNER
+ * (defense against a malicious/compromised client quoting someone else's
+ * signature), pack it in SMA format, relay handleOps from the server's bundler
+ * key, and wait for the receipt. The bundler key (AGENT_PRIVATE_KEY) pays gas;
+ * the UO itself is paid by the SCW's prefund.
+ */
+export async function submitGrant(userId, chainKey = "ethereum", { signature = null, quotedUserOp = null } = {}) {
+  if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) throw new Error("missing or malformed browser signature");
+  const rec = getWalletRecord(userId);
+  if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
+  const ownerEoa = getAddress(rec.ownerEoa);
+  const scwAddress = getAddress(rec.scwAddress);
+  const pub = await publicClientFor(chainKey);
+  const code = await pub.getCode({ address: scwAddress }).catch(() => "0x");
+  if (!code || code === "0x") throw new Error("smart wallet not deployed — activate it first");
+
+  // Rebuild the exact quote server-side (never trust a client-supplied userOp).
+  const quote = await grantSessionKeyForOwner(userId, chainKey);
+  const userOp = { ...quote.userOp, signature: packUOSignature(signature) };
+
+  // Signature check: recover the signer of the digest.
+  const digest = userOpDigest(chainKey, quote.userOp);
+  const recovered = await (await import("viem")).verifyMessage({ address: ownerEoa, message: { raw: digest } }, signature);
+  if (!recovered) throw new Error("grant signature does not recover the wallet owner — refusing to relay");
+
+  return relayUserOp(chainKey, userOp, { label: "grant" });
+}
+
+/**
+ * Relay a fully-signed UserOperation through EntryPoint 0.7 handleOps from the
+ * server's bundler key. Resolves to the inner tx hash once mined; throws with
+ * the decoded FailedOp reason on revert. Same plumbing the fork dry run proved.
+ */
+async function relayUserOp(chainKey, userOp, { label = "uo" } = {}) {
+  const dep = getChain(chainKey);
+  const pub = await publicClientFor(chainKey);
+  const bundlerPk = process.env.AGENT_PRIVATE_KEY?.trim();
+  if (!bundlerPk) throw new Error("no bundler key configured (AGENT_PRIVATE_KEY) — cannot relay user operations");
+  const { createWalletClient } = await import("viem");
+  const { privateKeyToAccount } = await import("viem/accounts");
+  const bundler = createWalletClient({ account: privateKeyToAccount(bundlerPk.startsWith("0x") ? bundlerPk : "0x" + bundlerPk), chain: dep.viemChain, transport: http(dep.httpRpc()) });
+  const beneficiary = getAddress(bundler.account.address); // gas refund to the relayer
+  const tx = await bundler.sendTransaction({
+    to: ENTRY_POINT_V7,
+    data: encodeFunctionData({ abi: parseAbi(["function handleOps((address,uint256,bytes,bytes,bytes32,bytes,bytes)[] ops, address beneficiary)"]), functionName: "handleOps", args: [[{
+      sender: userOp.sender,
+      nonce: userOp.nonce,
+      initCode: userOp.initCode,
+      callData: userOp.callData,
+      accountGasLimits: concat([padHex(userOp.verificationGasLimit, { size: 16 }), padHex(userOp.callGasLimit, { size: 16 })]),
+      preVerificationGas: userOp.preVerificationGas,
+      gasFees: concat([padHex(userOp.maxPriorityFeePerGas, { size: 16 }), padHex(userOp.maxFeePerGas, { size: 16 })]),
+      paymasterAndData: userOp.paymasterAndData ?? "0x",
+      signature: userOp.signature,
+    }], beneficiary] }),
+    gas: 3000000n,
+  });
+  const rcpt = await pub.waitForTransactionReceipt({ hash: tx });
+  if (rcpt.status !== "success") throw new Error(label + " relay tx reverted");
+  // Extract the inner tx from UserOperationEvent (topics[1] = userOpHash → not a tx hash;
+  // the inner tx hash is not directly exposed for handleOps relays — surface the relay tx).
+  return { ok: true, txHash: tx, relayTxHash: tx };
+}
+
+/** After the browser's grant UO lands: flip grantStatus → granted and warm the
+ *  AA client with the new key. Idempotent; safe to call after polling. */
+export async function confirmGrant(userId, chainKey = "ethereum") {
+  const rec = getWalletRecord(userId);
+  if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
+  if (!rec.sessionKeyEnc) throw new Error("no session key stored — call grantSessionKeyForOwner first");
+  const sk = decryptSessionKey(rec.sessionKeyEnc);
+  if (!sk) throw new Error("stored session key unreadable (MASTER_KEY?)");
+  process.env.AA_SESSION_KEY = sk;
+  invalidateSmartAccountClient(chainKey);
+  setWalletRecord(userId, {
+    scwAddress: rec.scwAddress,
+    ownerEoa: rec.ownerEoa,
+    salt: rec.salt,
+    sessionKeyAddress: rec.sessionKeyAddress,
+    sessionKeyEnc: rec.sessionKeyEnc,
+    grantStatus: "granted",
+  });
+  console.log(`[wallet-session] ${userId.slice(0, 6)}…${userId.slice(-4)}: session key GRANTED as entity-1 operator`);
+  return { ok: true, grantStatus: "granted", sessionKeyAddress: rec.sessionKeyAddress };
+}
+
+// ── v2 move-out (owner-signed sweep, SCW → browser EOA) ──────────────────────
+// The owner entity (entity 0, global validation) validates any calldata, so a
+// sweep works pre-grant. The browser signs the digest; the server verifies it
+// recovers the owner, then relays handleOps. Gas: SCW prefund (EntryPoint).
+
+/** Quote a v2 sweep: build the transfer UO and return the digest to sign. */
+export async function quoteMoveOutV2(userId, chainKey = "ethereum", { asset = "eth", amount = 0, browserFrom = null } = {}) {
+  const rec = getWalletRecord(userId);
+  if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
+  const ownerEoa = getAddress(rec.ownerEoa);
+  const scwAddress = getAddress(rec.scwAddress);
+  if (browserFrom && getAddress(browserFrom).toLowerCase() !== ownerEoa.toLowerCase()) {
+    throw new Error(`sweep must be signed by the wallet owner ${ownerEoa}`);
+  }
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw new Error("enter a positive amount");
+  const pub = await publicClientFor(chainKey);
+  const code = await pub.getCode({ address: scwAddress }).catch(() => "0x");
+  if (!code || code === "0x") throw new Error("smart wallet is not deployed yet — activate it first");
+  const dep = getChain(chainKey);
+
+  let innerData = "0x";
+  let value = 0n;
+  if (asset === "eth") {
+    const ethWei = await pub.getBalance({ address: scwAddress }).catch(() => 0n);
+    // keep ~gas float in the SCW (AA23 class) — clamp like the v1 max-send
+    const estGas = 150_000n * 30n * 10n ** 9n; // ~0.0045 ETH worst case
+    const max = ethWei > estGas ? ethWei - estGas : 0n;
+    value = parseUnits(String(amt), 18);
+    if (value > max) {
+      if (max === 0n) throw new Error(`balance (${Number(ethWei) / 1e18} ETH) can't cover gas — nothing sendable`);
+      value = max;
+    }
+  } else if (asset === "imd") {
+    if (!dep.imdToken) throw new Error("no IMD token configured on " + chainKey);
+    innerData = encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ownerEoa, parseUnits(String(amt), dep.imdDecimals ?? 18)] });
+  } else {
+    innerData = encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ownerEoa, parseUnits(String(amt), dep.dollarDecimals ?? 6)] });
+  }
+
+  const callData = encodeFunctionData({
+    abi: parseAbi(["function execute(address target, uint256 value, bytes data)"]),
+    functionName: "execute",
+    args: [asset === "eth" ? ownerEoa : (asset === "imd" ? getAddress(dep.imdToken) : getAddress(dep.dollar)), value, innerData],
+  });
+
+  const pubEp = getContract({ address: ENTRY_POINT_V7, abi: parseAbi(["function getNonce(address sender, uint192 key) view returns (uint256)"]), client: pub });
+  // Owner entity = global validation (entity 0) → nonce key 1
+  const nonce = await pubEp.read.getNonce([scwAddress, 1n]);
+
+  const userOp = {
+    sender: scwAddress,
+    nonce: "0x" + nonce.toString(16),
+    initCode: "0x",
+    callData,
+    verificationGasLimit: "0x" + (400000).toString(16),
+    callGasLimit: "0x" + (400000).toString(16),
+    preVerificationGas: "0x" + (120000).toString(16),
+    maxFeePerGas: "0x" + (30_000_000_000n).toString(16),
+    maxPriorityFeePerGas: "0x" + (1_000_000_000n).toString(16),
+    paymasterAndData: "0x",
+    signature: "SIGN_IN_BROWSER",
+  };
+  const digestToSign = userOpDigest(chainKey, userOp);
+  return {
+    ok: true,
+    browserSign: true,
+    schema: 2,
+    entryPoint: ENTRY_POINT_V7,
+    userOp,
+    digestToSign,
+    asset,
+    requestedAmount: amt,
+    sendValueEth: asset === "eth" ? Number(value) / 1e18 : 0,
+    message: "Sign the sweep in your browser wallet — the smart wallet transfers to your EOA.",
+  };
+}
+
+/** Submit the browser-signed sweep UO (same verify-then-relay as the grant). */
+export async function submitMoveOutV2(userId, chainKey = "ethereum", { asset = "eth", amount = 0, signature = null } = {}) {
+  if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) throw new Error("missing or malformed browser signature");
+  const rec = getWalletRecord(userId);
+  if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
+  const ownerEoa = getAddress(rec.ownerEoa);
+  const quote = await quoteMoveOutV2(userId, chainKey, { asset, amount });
+  const digest = userOpDigest(chainKey, quote.userOp);
+  const recovered = await (await import("viem")).verifyMessage({ address: ownerEoa, message: { raw: digest } }, signature);
+  if (!recovered) throw new Error("sweep signature does not recover the wallet owner — refusing to relay");
+  const userOp = { ...quote.userOp, signature: packUOSignature(signature) };
+  return relayUserOp(chainKey, userOp, { label: "sweep" });
 }
 
 /**
@@ -550,6 +933,14 @@ export function resolveUserSessionKey(userId) {
 export async function resolveUserSessionKeyAsync(userId) {
   if (!userId || !/^0x[0-9a-fA-F]{40}$/.test(userId)) return null;
   const rec = getWalletRecord(userId);
+  // v2 pre-grant (co-pilot-only): sessionKeyEnc is null BY DESIGN — return null
+  // so callers treat it as "no autonomy yet", never the funds-safety throw.
+  if (rec && isV2Record(rec)) {
+    if (!rec.sessionKeyEnc) return null;
+    const sk = decryptSessionKey(rec.sessionKeyEnc);
+    if (sk) return sk;
+    throw new Error(`registry session key for ${userId.slice(0, 6)}…${userId.slice(-4)} is unreadable — fix MASTER_KEY / data/connected-wallets.json (funds-safety guard)`);
+  }
   if (rec?.sessionKeyEnc) {
     const sk = decryptSessionKey(rec.sessionKeyEnc);
     if (sk) return sk;
@@ -636,10 +1027,24 @@ export async function getUserWalletStatus(userId, chainKey = "ethereum") {
  * POST /api/smart-wallet/move — { direction: "in"|"out", asset: "eth"|"usd", amount: number, chain }
  * Returns { ok, txHash } — caller (UI) reloads balances after.
  */
-export async function moveFunds({ direction, asset = "eth", amount, chainKey = "ethereum" }) {
+export async function moveFunds({ direction, asset = "eth", amount, chainKey = "ethereum", userId = null }) {
   const dep = getChain(chainKey);
   const amt = Number(amount);
   if (!Number.isFinite(amt) || amt <= 0) throw new Error("enter a positive amount");
+
+  // ── v2 wallets (user-EOA-owned, plan 2026-09-20): the OWNER is the user's
+  // browser EOA — the server has no owner signer and (pre-grant) no session
+  // key. Move-out for v2 is therefore NOT supported server-side; the slideout
+  // routes it through the browser-sign path instead (wallet-slideout.js).
+  // Move-in still works server-side when an env signer exists (local dev).
+  const rec = userId ? getWalletRecord(userId) : null;
+  if (rec && isV2Record(rec)) {
+    if (!direction_in(direction)) {
+      throw new Error("Move-out for user-EOA-owned wallets is signed in the browser (the owner is your own EOA) — use the browser-sign Move out in the slideout.");
+    }
+    // Fall through to move-in using whatever owner signer exists (env key on
+    // local dev; on hosted there is none and the browser path handles funding).
+  }
 
   const owner = await resolveOwnerSigner(chainKey);
   const scw = await getSmartAccountClient(chainKey);
