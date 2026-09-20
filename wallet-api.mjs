@@ -87,9 +87,9 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
       ethChains.push({ name: meta.name, initials: meta.initials, color: meta.color, balance: bal.ethBalance, balanceUsd: bal.ethUsd, error: err });
       usdChains.push({ name: meta.name, initials: meta.initials, color: meta.color, symbol: meta.dollarSymbol, balance: bal.dollarBalance, balanceUsd: bal.dollarBalance, error: err ?? (bal.dollarBalance == null ? "balanceOf failed" : null) });
       // IMD rows only for chains that have the token configured (a null balance
-      // on an IMD-less chain would just be noise).
+      // on an IMD-less chain would just be noise). meta.key is this chain's key.
       if (bal.imdBalance != null) {
-        imdChains.push({ name: meta.name, initials: meta.initials, color: meta.color, symbol: getChain(key).imdSymbol || "IMD", balance: bal.imdBalance, error: err });
+        imdChains.push({ name: meta.name, initials: meta.initials, color: meta.color, symbol: getChain(meta.key).imdSymbol || "IMD", balance: bal.imdBalance, error: err });
         imdTotal += bal.imdBalance ?? 0;
       }
       ethTotal += bal.ethBalance ?? 0; ethTotalUsd += bal.ethUsd ?? 0; usdTotalUsd += bal.dollarBalance ?? 0;
