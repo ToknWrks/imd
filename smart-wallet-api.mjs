@@ -353,19 +353,21 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
     const ownerEoa = getAddress(rec.ownerEoa);
     const pub = await publicClientFor(chainKey);
     const dep = getChain(chainKey);
-    // Destructuring must match the promise order: [scw-eth, scw-code, scd-usd, owner-eth, owner-usd]
-    const [scwEthWei, code, dollarRaw, ownerEthWei, ownerUsdRaw] = await Promise.all([
+    // Destructuring must match the promise order: [scw-eth, scw-code, scd-usd, owner-eth, owner-usd, price]
+    const [scwEthWei, code, dollarRaw, ownerEthWei, ownerUsdRaw, ethUsdPrice] = await Promise.all([
       pub.getBalance({ address: scwAddress }).catch(() => 0n),
       pub.getCode({ address: scwAddress }).catch(() => "0x"),
       getErc20Balance(dep.dollar, scwAddress, chainKey).catch(() => null),
       pub.getBalance({ address: ownerEoa }).catch(() => 0n),
       getErc20Balance(dep.dollar, ownerEoa, chainKey).catch(() => null),
+      getEthUsdPriceFor(chainKey).catch(() => 0),
     ]);
     return {
       ok: true,
       chain: chainKey,
       schema: 2,
       custodyLabel: "your EOA owns it",
+      ethUsd: ethUsdPrice,
       grantStatus: rec.grantStatus || "none",
       ownerEoa,
       hasSessionKey: Boolean(rec.sessionKeyEnc),
