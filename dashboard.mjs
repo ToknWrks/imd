@@ -1041,10 +1041,14 @@ async function settingsPage(vaultMsg = "", userId = null) {
   // Per-user signer state (Phase 2): mode + key presence from the users table.
   let userMode = "copilot";
   let userHasSessionKey = false;
+  let userV2 = null; // v2 registry record (user-EOA-owned wallet), if any
   if (userId) {
     const { getUser } = await import("./users.mjs");
     const u = getUser(userId);
     if (u) { userMode = u.signer_mode || "copilot"; userHasSessionKey = !!u.session_key_enc; }
+    const { getWalletRecord, isV2Record } = await import("./smart-wallet-registry.mjs");
+    const rec = getWalletRecord(userId);
+    if (rec && isV2Record(rec)) userV2 = rec;
   }
   const aaSessionKey = getEnvValue("AA_SESSION_KEY");
   let smartAddress = "";
@@ -1066,6 +1070,12 @@ async function settingsPage(vaultMsg = "", userId = null) {
 
     <div class="card">
       <h2>Signer</h2>
+      ${userV2 ? `
+        <p class="hint"><b>Your smart wallet</b> — <code>${userV2.scwAddress}</code> <span class="hint">(v2 — owned by YOUR browser wallet, on-chain)</span></p>
+        <p class="hint">Custody: the private keys in your browser extension are the on-chain owner. The server holds nothing until you grant automation — and even then the granted session key is an operator you can revoke, never the owner. There is <b>no session key to generate or back up</b>.</p>
+        <div id="userWalletBox"><p class="hint">Loading your trading wallet…</p></div>
+        <p class="hint" style="margin-top:0.8rem">Enable/disable automated trading from the <b>wallet slideout</b> (the wallet button in the header) — that is where the session-key operator is granted, in one browser-signed transaction. Pick your trading mode in the <b>Trading mode</b> card below.</p>
+      ` : `
       <p class="hint"><b>Default:</b> the wallet connected in the header (${copilotConnected ? `<code>${copilotConnected.slice(0, 6)}…${copilotConnected.slice(-4)}</code>` : "none connected yet — click Connect wallet above"}). In <b>Co-pilot</b> mode it approves every trade. Optionally generate a <b>smart wallet</b> below for autonomous trading — its session key is stored encrypted on this server, and it signs trades without waiting for you.</p>
       <div id="smartFields">
         <div id="userWalletBox">
@@ -1082,19 +1092,20 @@ async function settingsPage(vaultMsg = "", userId = null) {
         </div>
         <p class="hint" style="margin-top:0.8rem">Uses the platform ALCHEMY_API_KEY for the bundler/RPC. Your session key is stored AES-256-GCM encrypted; back it up when shown — it is a wallet seed. Pick your trading mode in the <b>Trading mode</b> card below.</p>
       </div>
+      `}
     </div>
 
     <div class="card">
       <h2>Trading mode</h2>
-      <p class="hint"><b>Autonomy</b> — your own smart wallet (session key) trades automatically. <b>Co-pilot</b> — every trade (dip, sniper, and MM) waits for your approval: the dashboard pops an approval modal, your connected browser wallet signs it, and anything you don't approve in time is <b>skipped and logged</b> — never traded without explicit approval.</p>
+      <p class="hint"><b>Autonomy</b> — your own smart wallet trades automatically. <b>Co-pilot</b> — every trade (dip, sniper, and MM) waits for your approval: the dashboard pops an approval modal, your connected browser wallet signs it, and anything you don't approve in time is <b>skipped and logged</b> — never traded without explicit approval.</p>
       <div class="field"><label>Your mode</label>
         <select id="copilotMode">
-          <option value="off" ${userMode === "autonomy" ? "selected" : ""}>Autonomy — trade automatically (your session key)</option>
+          <option value="off" ${userMode === "autonomy" ? "selected" : ""}>Autonomy — trade automatically (your smart wallet)</option>
           <option value="on" ${userMode === "copilot" ? "selected" : ""}>Co-pilot — approve every trade in the browser</option>
         </select>
       </div>
-      ${userMode === "autonomy" && !userHasSessionKey ? `<p class="hint" style="color:#f87171">⚠ Autonomy selected but no session key stored — generate one in the Signer section above, then save again.</p>` : ""}
-      ${userMode === "autonomy" && userHasSessionKey ? `<p class="hint">✓ Autonomy active — trades sign with your session key.</p>` : ""}
+      ${userV2 && userMode === "autonomy" && userV2.grantStatus !== "granted" ? `<p class="hint" style="color:#f87171">⚠ Autonomy selected but the automation grant has not landed — open the <b>wallet slideout</b> and click "Enable automated trading".</p>` : ""}
+      ${userMode === "autonomy" && (userV2 ? userV2.grantStatus === "granted" : userHasSessionKey) ? `<p class="hint">✓ Autonomy active — trades sign with your smart wallet${userV2 ? "'s session-key operator" : " session key"}.</p>` : ""}
       ${userMode === "copilot" ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Timeout: <code>COPILOT_TIMEOUT_S</code> (default 90s).</p>` : ""}
       <button onclick="saveCopilotMode(this)">Save trading mode</button>
     </div>
@@ -1862,9 +1873,19 @@ const server = createServer(async (req, res) => {
         const { mode } = JSON.parse(await readBody());
         if (!["copilot", "autonomy"].includes(mode)) return json({ ok: false, error: "mode must be copilot or autonomy" });
         if (mode === "autonomy") {
-          const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
-          if (!(await resolveUserSessionKeyAsync(uid))) {
-            return json({ ok: false, error: "generate a session key first — autonomy needs one to sign trades" });
+          // v2 wallets: autonomy requires the automation GRANT (entity-1
+          // operator landed on-chain), not a legacy generated session key.
+          const { getWalletRecord, isV2Record, } = await import("./smart-wallet-registry.mjs");
+          const rec = getWalletRecord(uid);
+          if (rec && isV2Record(rec)) {
+            if (rec.grantStatus !== "granted") {
+              return json({ ok: false, error: "automation not granted yet — open the wallet slideout and click \u201cEnable automated trading\u201d" });
+            }
+          } else {
+            const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
+            if (!(await resolveUserSessionKeyAsync(uid))) {
+              return json({ ok: false, error: "generate a session key first — autonomy needs one to sign trades" });
+            }
           }
         }
         setUserField(uid, "signer_mode", mode);
