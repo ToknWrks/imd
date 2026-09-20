@@ -54,12 +54,16 @@ export async function resolveSignerUser(userId, chainKey = "ethereum") {
       // Unified resolver (2026-09-18): registry first, users-table key as legacy
       // fallback — one wallet per user across slideout, settings, and signing.
       const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
+      const { getWalletRecord, isV2Record } = await import("./smart-wallet-registry.mjs");
       const sessionKey = await resolveUserSessionKeyAsync(userId);
       if (!sessionKey) throw new Error(`user ${userId.slice(0, 6)}…${userId.slice(-4)} has autonomy mode but no session key stored — connect your wallet in the header (or generate one in Settings)`);
+      // v2: pin the client to the registry SCW (EOA-owned SMA, entity-1 signing).
+      const rec = getWalletRecord(userId);
+      const scwAddress = rec && isV2Record(rec) ? rec.scwAddress : null;
       // Per-user session key passed directly — no env swap needed; the client
       // cache in smart-account.mjs keys on the session key so users can't collide.
       const { buildSmartAccountSigner } = await import("./smart-account.mjs");
-      return buildSmartAccountSigner(chainKey, { sessionKey });
+      return buildSmartAccountSigner(chainKey, { sessionKey, scwAddress });
     }
     throw new Error(`unknown signer_mode "${mode}"`);
   })();
