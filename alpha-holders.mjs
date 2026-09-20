@@ -65,18 +65,28 @@ const wei = (v) => Number(BigInt(v ?? 0)) / 1e18;
 /**
  * Full holder distribution for a curve coin.
  * @param {string} coinAddress
- * @param {object} [opts] { userAddress: string|null } — wallet to highlight
+ * @param {object} [opts] { userAddress: string|null } OR { userAddresses: string[] }
+ *   — wallet(s) to highlight. When several are given (SCW + browser EOA), the
+ *   user card shows their SUMMED position across all of them (2026-09-19,
+ *   same fix as the /tokens + /sniper balance paths: curve buys land in the
+ *   EOA while app-signed trades land in the SCW — neither alone is truthful).
  */
 export async function getCurveHolderDistribution(coinAddress, opts = {}) {
   const coin = String(coinAddress || "").toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(coin)) throw new Error("invalid coin address");
-  const user = opts.userAddress ? String(opts.userAddress).toLowerCase() : null;
+  // Accept ONE wallet (userAddress, legacy) or a LIST (userAddresses — the
+  // user's SCW + browser EOA, resolved per-session by the caller). Each entry
+  // is annotated separately; the client shows the SUMMED card (see annotate).
+  const user = opts.userAddresses?.length
+    ? opts.userAddresses.map((a) => String(a).toLowerCase())
+    : opts.userAddress
+      ? [String(opts.userAddress).toLowerCase()]
+      : [];
 
   const hit = cache.get(coin);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     return annotate(hit.data, user);   // user overlay is cheap — recompute per request
   }
-
   const cd = await gql(COIN_Q, { addr: coin });
   const c = cd?.coin;
   if (!c) throw new Error("coin not found on the indexer");
@@ -137,28 +147,38 @@ export async function getCurveHolderDistribution(coinAddress, opts = {}) {
   return annotate(data, user);
 }
 
-/** Per-request overlay: user's own position + creator flag (not cached). */
-function annotate(data, user) {
+/** Per-request overlay: user's own position + creator flag (not cached).
+ *  `user` is a LIST of the session user's read wallets (SCW + browser EOA).
+ *  Every wallet of theirs that appears as a holder gets its own donut row
+ *  highlight, and the user card reports the SUM across all of them. */
+function annotate(data, user = []) {
   const creator = data.coin.creator;
+  const wallets = (Array.isArray(user) ? user : user ? [user] : []);
   const out = {
     ...data,
     holders: data.holders.map((h) => ({
       ...h,
       isCreator: h.address === creator,
+      isYou: wallets.includes(h.address),
     })),
     user: null,
   };
-  if (user) {
-    const me = out.holders.find((h) => h.address === user);
-    if (me) {
-      const avg = me.imdSpent > 0 ? me.imdSpent / me.amount : null; // IMD per coin, buy-side only
+  if (wallets.length) {
+    const mine = out.holders.filter((h) => h.isYou);
+    if (mine.length) {
+      const amount = mine.reduce((s, h) => s + h.amount, 0);
+      const imdSpent = mine.reduce((s, h) => s + h.imdSpent, 0);
+      const avg = imdSpent > 0 ? imdSpent / amount : null; // IMD per coin, buy-side only
       out.user = {
-        address: user, pct: me.pct, amount: me.amount,
-        rank: out.holders.findIndex((h) => h.address === user) + 1,
-        avgEntryImd: avg, isCreator: me.address === creator,
+        addresses: wallets,
+        pct: mine.reduce((s, h) => s + h.pct, 0),
+        amount,
+        rank: Math.min(...mine.map((h) => out.holders.findIndex((x) => x.address === h.address) + 1)),
+        avgEntryImd: avg,
+        isCreator: wallets.includes(creator),
       };
     } else {
-      out.user = { address: user, pct: 0, amount: 0, rank: null, avgEntryImd: null, isCreator: false };
+      out.user = { addresses: wallets, pct: 0, amount: 0, rank: null, avgEntryImd: null, isCreator: false };
     }
   }
   return out;

@@ -75,13 +75,62 @@ broke under multiple wallets. All landed and verified on the VPS:
 
 ### Still open (found during that sweep, not yet built)
 
-1. `mm_trades` + `sniper_autosells` have no `user_id` (MM never migrated).
+1. `mm_trades` has no `user_id` (MM never migrated). `sniper_autosells` got
+   its `user_id` column + owner-stamped arming/execution on 2026-09-19.
 2. Gas backfill is manual — sniper buys never record gas at trade time;
    schedule `POST /api/gas/backfill` (cron or watcher timer).
 3. No arbitrary-ERC20 move-out UI — slideout moves ETH/dollar only. Build
    before any meaningful tokens sit in a user's SCW (autonomy switch).
 4. Shared pm2 daemon with the agentsignal app — scoped commands enforced by
    convention, not by separation. Strongest fix: separate PM2_HOME per app.
+5. Dead `CONNECTED_WALLET=0xa71F…` line still in the VPS `.env` (unused by
+   code since `e624845`; delete whenever). `zooch.app` still serves during
+   the domain transition.
+
+## Session 2026-09-19 (later) — split-custody balances + sniper isolation
+
+The second half of the day: after the per-user sweep went live, users saw
+zero balances on launchpad tokens and other wallets' sniper trades.
+
+- ✅ **Sniper stack fully per-user** (`9ec3042`, `e18121f`): the trades list,
+  ledger P/L (`sniperLedgerStats` → `getSniperTokenHistory`), recent tokens,
+  and autosells are all owner-scoped now. `sniper_autosells` gained
+  `user_id`; the autosell daemon signs as the ORDER'S owner
+  (`resolveSignerUser(order.user_id)`), never the global signer. The uid
+  scope bug (`e18121f`) was a block-scope `const uid` inside a try — every
+  route after the block threw `uid is not defined`; caught by an
+  authenticated-render repro, invisible to `node --check`.
+- ✅ **Legacy rows stay SHARED** (`b3efbf8`): the startup backfill treated
+  every NULL `user_id` as "assign to admin" — including the sniper token
+  memory, so it kept RE-STAMPING rows the moment you NULL-ed them. NULL now
+  means "shared seeded history" for `sniper_recent_tokens` +
+  `sniper_trades`; the backfill no longer touches those two tables.
+- ✅ **Balances sum BOTH user wallets** (`71226dd`): launchpad/curve buys
+  execute from the BROWSER wallet while app-signed trades land in the SCW.
+  The old single read-wallet (SCW-preferred) returned 0 for anyone whose
+  tokens sat in the EOA. `resolveUserReadWallets()` returns [SCW, EOA];
+  `computeWalletPosition` sums `balanceOf` across them and merges the
+  cost-basis transfer histories (deduped); `getSniperPosition` sums too.
+- ✅ **Wallet-sync scans all wallets, sequentially** (`f04a9a4`): sync ran
+  on one wallet — for copilot users, the empty SCW. Now per-wallet runs
+  SCW-first-then-EOA, SEQUENTIALLY (the known-tx dedupe set is read at each
+  sync's start; parallel runs would double-insert a tx touching both).
+- ✅ **Sync button on /tokens rows** (`20660d7`): new
+  `/api/watchers/:id/wallet-sync` — same per-wallet import + position
+  recompute, one click per tracked token.
+- ⏸️ **Top-card vs row P/L mismatch on /tokens — tabled.** Rows and top
+  cards read the same stored fields; the sum math says they must match.
+  If it resurfaces: grab WHICH card + two concrete numbers before
+  debugging. (Suspicion: cross-page comparison — /tokens is per-user,
+  other pages may show other users' tokens.)
+
+### Local-key incident (2026-09-19)
+
+The local MASTER_KEY was lost and rotated (`openssl rand -hex 32`); the
+local registry held two bricked entries (no funds) and was cleared. Both
+MASTER_KEYs are now in the password manager. The VPS key was never at
+risk. Lesson: env-critical secrets live in the password manager from day
+one, not after the first loss.
 
 ## Phase 1 — host it for yourself (the near path)
 

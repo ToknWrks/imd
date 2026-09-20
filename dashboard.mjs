@@ -1630,27 +1630,29 @@ async function alphaPage(srcParam = "on-curve", volParam = "0") {
         const rest = holders.slice(TOP_SLICES).reduce((s, h) => s + h.pct, 0);
         return rest > 0.0001 ? [...top, { address: null, pct: rest, others: true }] : top;
       }
-      function renderDonut(holders, userAddr) {
+      function renderDonut(holders, userAddrs) {
         const svg = document.getElementById("holderDonut");
         const legend = document.getElementById("donutLegend");
         const slices = donutSlices(holders);
         const R = 70, CX = 90, CY = 90, SW = 26;
         const C = 2 * Math.PI * R;
+        const mine = Array.isArray(userAddrs) ? userAddrs : (userAddrs ? [userAddrs] : []);
         let off = 0;
         const arcs = slices.map((s, i) => {
           const frac = Math.max(0, s.pct) / 100;
           const len = frac * C;
           const col = s.others ? "rgba(255,255,255,0.18)" : DONUT_COLORS[i % DONUT_COLORS.length];
-          const label = s.others ? "Others (" + (holders.length - TOP_SLICES) + " wallets)" : (s.address === userAddr ? "YOU — " + fmtPct(s.pct) : fmtAddr(s.address) + " — " + fmtPct(s.pct));
-          const el = '<circle cx="' + CX + '" cy="' + CY + '" r="' + R + '" fill="none" stroke="' + col + '" stroke-width="' + (s.address === userAddr ? SW + 3 : SW) + '" stroke-dasharray="' + len + ' ' + (C - len) + '" stroke-dashoffset="' + (-off) + '" transform="rotate(-90 ' + CX + ' ' + CY + ')"' + (s.address ? ' data-addr="' + s.address + '" style="cursor:pointer"' : '') + '><title>' + (s.others ? "others" : s.address) + ' · ' + fmtPct(s.pct) + '</title></circle>';
+          const you = s.address && mine.some((a) => a.toLowerCase() === String(s.address).toLowerCase());
+          const label = s.others ? "Others (" + (holders.length - TOP_SLICES) + " wallets)" : (you ? "YOU — " + fmtPct(s.pct) : fmtAddr(s.address) + " — " + fmtPct(s.pct));
+          const el = '<circle cx="' + CX + '" cy="' + CY + '" r="' + R + '" fill="none" stroke="' + col + '" stroke-width="' + (you ? SW + 3 : SW) + '" stroke-dasharray="' + len + ' ' + (C - len) + '" stroke-dashoffset="' + (-off) + '" transform="rotate(-90 ' + CX + ' ' + CY + ')"' + (s.address ? ' data-addr="' + s.address + '" style="cursor:pointer"' : '') + '><title>' + (s.others ? "others" : s.address) + ' · ' + fmtPct(s.pct) + '</title></circle>';
           off += len;
-          return { el, s, col, label };
+          return { el, s, col, label, you };
         });
         svg.innerHTML = arcs.map((a) => a.el).join("") +
           '<text x="' + CX + '" y="' + (CY - 4) + '" text-anchor="middle" fill="#e8eaed" font-size="15" font-weight="600">' + holders.length + '</text>' +
           '<text x="' + CX + '" y="' + (CY + 12) + '" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="8.5" letter-spacing="0.08em">HOLDERS</text>';
         legend.innerHTML = arcs.map((a, i) =>
-          '<div class="legend-row" data-idx="' + i + '"' + (a.s.address === userAddr ? ' style="border-color:rgba(74,222,128,0.5)"' : '') + '>' +
+          '<div class="legend-row" data-idx="' + i + '"' + (a.you ? ' style="border-color:rgba(74,222,128,0.5)"' : '') + '>' +
           '<span class="swatch" style="background:' + a.col + '"></span>' +
           '<span class="legend-label">' + a.label + '</span>' +
           '<span class="legend-pct">' + fmtPct(a.s.pct) + '</span></div>').join("");
@@ -1661,7 +1663,8 @@ async function alphaPage(srcParam = "on-curve", volParam = "0") {
         const info = document.getElementById("holderInfo");
         if (!me) { info.textContent = ""; return; }
         const creatorTag = me.isCreator ? ' <span class="pill on" style="font-size:0.62rem;padding:0.1rem 0.4rem">creator</span>' : "";
-        const youTag = modalData.user && me.address === modalData.user.address ? ' <span class="pill on" style="font-size:0.62rem;padding:0.1rem 0.4rem">you</span>' : "";
+        const mine = Array.isArray(modalData?.user?.addresses) ? modalData.user.addresses : (modalData?.user?.address ? [modalData.user.address] : []);
+        const youTag = mine.some((a) => a.toLowerCase() === String(addr).toLowerCase()) ? ' <span class="pill on" style="font-size:0.62rem;padding:0.1rem 0.4rem">you</span>' : "";
         const avg = me.imdSpent > 0 ? " · avg entry " + fmtImd(me.imdSpent / me.amount) + " IMD" : "";
         info.innerHTML = '<b>' + fmtAddr(me.address) + '</b>' + creatorTag + youTag + ' — ' + fmtPct(me.pct) + ' · ' + fmtImd(me.amount) + ' coins' + avg;
         const idx = donutSlices(modalData.holders).findIndex((s) => s.address === addr);
@@ -1694,7 +1697,7 @@ async function alphaPage(srcParam = "on-curve", volParam = "0") {
           const ageStr = !age ? "—" : age < 3600 ? Math.round(age / 60) + "m" : age < 86400 ? Math.round(age / 3600) + "h" : Math.round(age / 86400) + "d";
           const userCard = j.user ? (
             j.user.amount > 0
-              ? '<div class="user-pos"><b style="color:#4ade80">Your position</b> — ' + fmtPct(j.user.pct) + ' of holders' + (j.user.rank ? " · rank #" + j.user.rank : "") + ' · ' + fmtImd(j.user.amount) + ' coins' + (j.user.avgEntryImd ? ' · avg entry ' + fmtImd(j.user.avgEntryImd) + ' IMD' : '') + '</div>'
+              ? '<div class="user-pos"><b style="color:#4ade80">Your position</b> — ' + fmtPct(j.user.pct) + ' of holders' + (j.user.rank ? " · rank #" + j.user.rank : "") + ' · ' + fmtImd(j.user.amount) + ' coins' + (j.user.avgEntryImd ? ' · avg entry ' + fmtImd(j.user.avgEntryImd) + ' IMD' : '') + (Array.isArray(j.user.addresses) && j.user.addresses.length > 1 ? ' <span class="hint">(across ' + j.user.addresses.length + ' wallets: ' + j.user.addresses.map((a) => fmtAddr(a)).join(" + ") + ')</span>' : '') + '</div>'
               : '<div class="user-pos" style="color:rgba(255,255,255,0.4)">You hold none of this token (on-curve).</div>'
           ) : "";
           body.innerHTML =
@@ -1707,7 +1710,7 @@ async function alphaPage(srcParam = "on-curve", volParam = "0") {
             '<div class="donut-wrap"><svg id="holderDonut" viewBox="0 0 180 180" width="180" height="180"></svg><div id="donutLegend" class="donut-legend"></div></div>' +
             '<div id="holderInfo" class="hint" style="min-height:1.2rem"></div>' +
             '<p class="hint" style="border-top:1px solid rgba(255,255,255,0.09);padding-top:0.6rem;margin-top:0.8rem">Derived from ' + j.tradesAnalyzed.toLocaleString() + ' curve trades across ' + j.walletsTraded.toLocaleString() + ' wallets (launchpad indexer' + (j.tradesSkipped ? ', ' + j.tradesSkipped.toLocaleString() + ' earliest trades skipped' : '') + '). Net buys − sells per wallet — not an on-chain balance scan. Creator ' + '<span class="mono">' + fmtAddr(c.creator) + '</span>' + creatorPhrase(c, j) + '</p>';
-          renderDonut(j.holders, j.user?.address ?? null);
+          renderDonut(j.holders, j.user?.addresses ?? j.user?.address ?? null);
         } catch (e) {
           body.innerHTML = '<p style="color:#f87171">Failed to load: ' + hesc(e.message || e) + '</p>';
         }
@@ -1789,14 +1792,23 @@ const server = createServer(async (req, res) => {
     if (await handleSniperRequest(url, method, { req, readBody, json, send, shell, esc, explorerLink, getChain, sessionAddress })) return;
     // Alpha token modal: full holder distribution for a curve coin. Read-only
     // (one indexer fetch, 5-min server cache) — no funds move, no approval needed.
+    // Per-user (2026-09-19): resolve the SESSION user's read wallets (SCW +
+    // browser EOA) — never the global resolveSigner(), which is a legacy env
+    // wallet belonging to nobody. curve-buys land in the EOA while app-signed
+    // trades land in the SCW, so BOTH are summed (annotate() folds the
+    // per-wallet balances into one position, donut-highlighting both rows).
     if (url === "/api/alpha/holders" && method === "GET") {
       try {
         const addr = requestUrl.searchParams.get("address") ?? "";
-        let user = null;
+        let userAddresses = null;
         try {
-          if (await isSignerConfigured()) user = (await resolveSigner("ethereum")).address;
-        } catch { /* no wallet configured — modal just hides the position card */ }
-        return json({ ok: true, ...(await getCurveHolderDistribution(addr, { userAddress: user })) });
+          const uid = sessionAddress(req);
+          if (uid) {
+            const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+            userAddresses = await resolveUserReadWallets(uid, "ethereum");
+          }
+        } catch { /* no wallet — modal just hides the position card */ }
+        return json({ ok: true, ...(await getCurveHolderDistribution(addr, { userAddresses })) });
       } catch (e) { return json({ ok: false, error: e.message }, 404); }
     }
     if (await handleMmRequest(url, method, { readBody, json, send, shell, esc, explorerLink, getChain })) return;
