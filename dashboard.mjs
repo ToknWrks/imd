@@ -395,7 +395,11 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         <form id="addForm" onsubmit="return submitAdd(event)">
           <div class="field">
             <label>Chain</label>
-            <select name="chain">${CHAIN_KEYS.map((k) => `<option value="${esc(k)}">${esc(getChain(k).name)}</option>`).join("")}</select>
+            <!-- Ethereum only (2026-09-19): the tokens UI targets mainnet.
+                 robinhood + base stay in CHAIN_KEYS (chains.mjs) — legacy
+                 watchers on those chains keep working; this dropdown just
+                 doesn't offer adding new ones. -->
+            <select name="chain"><option value="ethereum">Ethereum</option></select>
           </div>
           <div class="field" style="margin-bottom:0.4rem">
             <label>Token contract address</label>

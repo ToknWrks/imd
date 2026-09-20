@@ -72,7 +72,7 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
             <label>Base token</label>
             <div class="pair-tabs">
               <button type="button" id="baseEth" class="on" onclick="setBase('ETH')">ETH</button>
-              <button type="button" id="baseUsdc" class="secondary" onclick="setBase('USDC')">USDC</button>
+              <button type="button" id="baseImd" class="secondary" onclick="setBase('IMD')">IMD</button>
             </div>
             <div class="row">
               <div class="field">
@@ -163,7 +163,7 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
       </div>
     </div>
     <script>
-      let ctx = ${JSON.stringify({ chain, ethUsd, ethBalance: ctx?.ethBalance ?? 0, usdcBalance: ctx?.usdcBalance ?? 0, ethUsdValue: ctx?.ethUsdValue ?? 0, activeToken: ctx?.activeToken ?? null })};
+      let ctx = ${JSON.stringify({ chain, ethUsd, ethBalance: ctx?.ethBalance ?? 0, ethUsdValue: ctx?.ethUsdValue ?? 0, imdPerEth: ctx?.imdPerEth ?? 0, activeToken: ctx?.activeToken ?? null })};
       let base = "ETH";
       let lastDiscover = null;
       let chosenPool = null;
@@ -224,28 +224,35 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
         base = which;
         document.getElementById("baseEth").classList.toggle("on", which === "ETH");
         document.getElementById("baseEth").classList.toggle("secondary", which !== "ETH");
-        document.getElementById("baseUsdc").classList.toggle("on", which === "USDC");
-        document.getElementById("baseUsdc").classList.toggle("secondary", which !== "USDC");
-        document.getElementById("amountLabel").textContent = which === "ETH" ? "Buy Amount (ETH)" : "Buy Amount (USD, sized in ETH)";
+        document.getElementById("baseImd").classList.toggle("on", which === "IMD");
+        document.getElementById("baseImd").classList.toggle("secondary", which !== "IMD");
+        document.getElementById("amountLabel").textContent = which === "ETH" ? "Buy Amount (ETH)" : "Buy Amount (IMD, sized in ETH)";
         syncUsd();
       }
 
       function syncUsd() {
         const amt = parseFloat(document.getElementById("buyAmount").value) || 0;
         const usdLine = document.getElementById("usdLine");
-        if (!(ctx.ethUsd > 0)) { usdLine.textContent = "≈ $— USD"; return; }
-        if (base === "ETH") {
-          usdLine.textContent = "≈ $" + (amt * ctx.ethUsd).toLocaleString(undefined, {maximumFractionDigits:2}) + " USD";
-        } else {
-          usdLine.textContent = "≈ " + (amt / ctx.ethUsd).toLocaleString(undefined, {maximumFractionDigits:6}) + " ETH";
+        if (base === "IMD") {
+          // IMD mode: show ETH equivalent (and USD when both rates are live).
+          if (!(ctx.imdPerEth > 0)) { usdLine.textContent = "≈ — ETH (ETH/IMD rate unavailable)"; return; }
+          const eth = amt / ctx.imdPerEth;
+          usdLine.textContent = "≈ " + eth.toLocaleString(undefined, {maximumFractionDigits:6}) + " ETH" +
+            (ctx.ethUsd > 0 ? " · $" + (eth * ctx.ethUsd).toLocaleString(undefined, {maximumFractionDigits:2}) + " USD" : "");
+          return;
         }
+        if (!(ctx.ethUsd > 0)) { usdLine.textContent = "≈ $— USD"; return; }
+        usdLine.textContent = "≈ $" + (amt * ctx.ethUsd).toLocaleString(undefined, {maximumFractionDigits:2}) + " USD";
       }
 
       function ethAmountForBuy() {
         const amt = parseFloat(document.getElementById("buyAmount").value) || 0;
         if (base === "ETH") return amt;
-        if (!(ctx.ethUsd > 0)) throw new Error("ETH/USD unavailable");
-        return amt / ctx.ethUsd;
+        // IMD base: convert at the live ETH/IMD pool rate; the buy itself
+        // always pays ETH (the server-side route is ETH-funded by design —
+        // every venue on this platform routes through ETH).
+        if (!(ctx.imdPerEth > 0)) throw new Error("ETH/IMD rate unavailable");
+        return amt / ctx.imdPerEth;
       }
 
       async function discover() {

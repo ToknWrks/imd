@@ -10,7 +10,7 @@ import {
   discoverPools,
 } from "./sniper-swap.mjs";
 import { findLongVenue, executeLongSell, isLongVenue } from "./long-platform.mjs";
-import { findBestV4Pool, findBestV3DollarPool, findBestPool, resolvePoolOverride } from "./dip-swap.mjs";
+import { findBestV4Pool, findBestV3DollarPool, findBestPool, resolvePoolOverride, getImdPerEth } from "./dip-swap.mjs";
 import { getChain } from "./chains.mjs";
 import { resolveSigner } from "./signer.mjs";
 import { recordGasForTx } from "./gas-ledger.mjs";
@@ -239,7 +239,11 @@ export async function getQuoteContext(chainKey, owner) {
     ethBal = Number(wei) / 1e18;
     usdcBal = Number(usdcRaw) / 10 ** usdcDecimals;
   }
-  return { chain: chainKey, ethUsd, ethBalance: ethBal, usdcBalance: usdcBal, ethUsdValue: ethBal * ethUsd };
+  // Live ETH/IMD pool rate (60s server cache in dip-swap) — the sniper's IMD
+  // base-denomination converts through this. Non-critical display data: a
+  // failure yields 0 and the UI shows an em-dash, it never blocks a buy.
+  const imdPerEth = await getImdPerEth(chainKey).catch(() => 0);
+  return { chain: chainKey, ethUsd, ethBalance: ethBal, usdcBalance: usdcBal, ethUsdValue: ethBal * ethUsd, imdPerEth };
 }
 
 export function usdToEth(usd, ethUsd) {

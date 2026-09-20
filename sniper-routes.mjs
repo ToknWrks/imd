@@ -69,7 +69,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
     }
   } catch { /* fall through to per-route resolution */ }
   if (url === "/sniper" && method === "GET") {
-    let ctx = { chain: "ethereum", ethUsd: 0, ethBalance: 0, usdcBalance: 0, ethUsdValue: 0 };
+    let ctx = { chain: "ethereum", ethUsd: 0, ethBalance: 0, usdcBalance: 0, ethUsdValue: 0, imdPerEth: 0 };
     try {
       let owner = readWallet;
       if (!owner) { try { owner = (await resolveSigner("ethereum")).address; } catch {} }
