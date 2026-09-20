@@ -384,16 +384,22 @@ async function swActivate(){
       // exactly what to fund — the SCW balance is irrelevant for this.
       _swStatus(j.message,false,true);
       if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
-      // Show the gas-key address prominently + a copy button.
+      // Show the gas-key address prominently + a copy button. Insert before
+      // the .sw-grid (a DIRECT child of #smartWalletSection — insertBefore
+      // throws if the reference node is a deeper descendant).
       var host=document.getElementById('smartWalletSection');
       if(host && j.gasPayer){
+        var old=document.getElementById('gasKeyNote');
+        if(old) old.remove();
         var note=document.createElement('div');
-        note.className='sw-card';note.style.gridColumn='1/-1';note.style.marginTop='0.6rem';
+        note.id='gasKeyNote';
+        note.className='sw-card';note.style.marginTop='0.6rem';
         note.innerHTML='<b style="color:#e8b661">Fund the gas key to activate</b>'+
           '<div class="sw-addr" style="margin-top:0.35rem"><span>'+_swAddr(j.gasPayer)+'</span>'+
           '<button type="button" class="sw-copy" data-addr="'+_we(j.gasPayer)+'" onclick="swCopyAddr(this)" title="Copy gas-key address">\u29c9</button></div>'+
           '<div class="hint" style="margin-top:0.25rem">~0.002 ETH covers the mainnet deploy. Current balance: '+_wfu(j.gasPayerBalanceEth)+' ETH. Activation is signed by this key because the factory requires msg.sender = owner.</div>';
-        host.insertBefore(note, host.querySelector('.sw-status'));
+        var grid=host.querySelector('.sw-grid');
+        if(grid){host.insertBefore(note,grid);}else{host.appendChild(note);}
       }
       return;
     }
