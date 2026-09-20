@@ -9,7 +9,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "fs";
 
-const STUB_DIR = "scripts/stubs";
+// Own stub dir — the v2 test writes the same filenames into scripts/stubs and
+// node --test runs suites concurrently, so a shared dir races (flaky fails).
+const STUB_DIR = "scripts/stubs-activate";
 
 const STUBS = {
   "smart-account.stub.mjs": `
@@ -172,6 +174,6 @@ test("activateSmartWallet browser path returns a signable payload (no ReferenceE
   const out = execFileSync(process.execPath, [
     "--import", "./scripts/test-loader.mjs",
     SNIPPET_PATH,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", env: { ...process.env, TEST_STUB_DIR: "stubs-activate" } });
   assert.match(out, /(ACTIVATE_NEEDS_GAS_OK|ACTIVATE_BROWSER_PATH_OK)/);
 });

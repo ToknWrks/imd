@@ -1156,6 +1156,22 @@ async function settingsPage(vaultMsg = "", userId = null) {
           if (r.status === 401) { location.reload(); return; }
           const j = await r.json();
           if (!j.ok) { box.innerHTML = '<p class="hint" style="color:#f87171">' + (j.error || 'unavailable') + '</p>'; return; }
+          // ── v2 wallet (user-EOA-owned): the legacy generate/regenerate
+          // buttons MUST NOT run — they mint a v1 key and RE-DERIVE the SCW
+          // address, orphaning the user's activated, funded wallet (the
+          // 2026-09-20 incident). For v2, autonomy is granted in the wallet
+          // slideout ("Enable automated trading"), which installs the session
+          // key as an entity-1 operator WITHOUT changing the SCW address.
+          if (j.schema === 2) {
+            const gs = j.grantStatus || 'none';
+            box.innerHTML =
+              '<p>✓ Your smart wallet — <code>' + j.address + '</code> <span class="hint">(v2 — owned by YOUR browser wallet)</span></p>' +
+              '<p class="hint">Balance: ' + (j.eth != null ? j.eth.toFixed(6) : '0.000000') + ' ETH · ' + (j.deployed ? 'deployed ✓' : 'not deployed — activate it in the wallet slideout') + '</p>' +
+              '<p class="hint">Custody: your browser wallet is the on-chain owner. No session key to generate or back up.</p>' +
+              '<p class="hint">Automation: <b>' + (gs === 'granted' ? 'ENABLED — the session key can trade unattended' : gs === 'pending' ? 'grant pending — finish it in the wallet slideout (Enable automated trading)' : 'off — enable it via the wallet slideout → "Enable automated trading"') + '</b>.</p>' +
+              '<p class="hint" style="color:#e8b661">⚠ Do NOT use the Generate/Regenerate buttons below — they are legacy v1 tools and would derive a different wallet address, orphaning this one.</p>';
+            return;
+          }
           if (!j.hasKey) {
             box.innerHTML = '<p class="hint">No session key yet — click <b>Generate a session key</b> below. Your key derives YOUR OWN smart account; fund that address with your plan budget + gas.</p>'
               + '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b> — change it in the Trading mode card below.</p>';

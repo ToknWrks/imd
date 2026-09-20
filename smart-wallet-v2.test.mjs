@@ -14,7 +14,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "fs";
 
-const STUB_DIR = "scripts/stubs";
+// Own stub dir — see smart-wallet-activate.test.mjs; shared dirs race under
+// concurrent node --test suites.
+const STUB_DIR = "scripts/stubs-v2";
 mkdirSync(STUB_DIR, { recursive: true });
 
 // Registry stub with an in-memory store so v2/v1 shapes can coexist.
@@ -88,7 +90,7 @@ writeFileSync(`${STUB_DIR}/dip-swap.stub.mjs`, `export async function getErc20Ba
 const SNIPPET = `
   process.env.MASTER_KEY = "stub";
   const mod = await import("../smart-wallet-api.mjs");
-  const regMod = await import("./stubs/registry-v2.stub.mjs");
+  const regMod = await import("./stubs-v2/registry-v2.stub.mjs");
   const __store = regMod.__store;
   const probe = "0x" + "c".repeat(40);
   const out = [];
@@ -133,7 +135,7 @@ const SNIPPET = `
 writeFileSync("scripts/.v2-snippet.mjs", SNIPPET);
 
 test("v2 wallet lifecycle: derive → copilot-null → read → browser-activate → moveout guard", () => {
-  const out = execFileSync(process.execPath, ["--import", "./scripts/test-loader.mjs", "scripts/.v2-snippet.mjs"], { encoding: "utf8" });
+  const out = execFileSync(process.execPath, ["--import", "./scripts/test-loader.mjs", "scripts/.v2-snippet.mjs"], { encoding: "utf8", env: { ...process.env, TEST_STUB_DIR: "stubs-v2" } });
   assert.match(out, /PASS read-wallets-v2/);
   assert.match(out, /PASS activate-owner/);
   assert.match(out, /PASS moveout-blocked/);

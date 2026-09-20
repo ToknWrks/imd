@@ -968,6 +968,17 @@ export async function resolveUserSessionKeyAsync(userId) {
 
 export async function generateUserSessionKey(userId, chainKey = "ethereum", { force = false } = {}) {
   if (!userId) throw new Error("userId required");
+  // ── v2 GUARD (2026-09-20 incident): this legacy path RE-DERIVES the SCW
+  // from a fresh key, which would orphan an activated, funded user-EOA-owned
+  // wallet. v2 users grant automation via the slideout instead.
+  const rec2 = getWalletRecord(userId);
+  if (rec2 && isV2Record(rec2)) {
+    return {
+      ok: false,
+      blocked: "v2-wallet",
+      message: "This wallet is a v2 (user-EOA-owned) smart wallet — its address never changes. To enable automated trading, open the wallet slideout and click \u201cEnable automated trading\u201d. The legacy Generate/Regenerate buttons do not apply.",
+    };
+  }
   const { getUser, setUserSecret, getUserSecret } = await import("./users.mjs");
   const user = getUser(userId);
   if (!user) throw new Error("unknown user");
@@ -1022,6 +1033,27 @@ export async function getUserWalletStatus(userId, chainKey = "ethereum") {
   const { getUser } = await import("./users.mjs");
   const user = getUser(userId);
   if (!user) return { ok: false, error: "unknown user" };
+  // ── v2 records: report the REGISTRY SCW directly. Never derive from a
+  // session key here — the v2 SCW address is EOA-owned and independent of
+  // any key (the Settings UI must show the SAME wallet as the slideout).
+  const rec = getWalletRecord(userId);
+  if (rec && isV2Record(rec)) {
+    const dep = getChain(chainKey);
+    const pub = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
+    const address = getAddress(rec.scwAddress);
+    let eth = null, usd = null, deployed = false;
+    try {
+      eth = Number(await pub.getBalance({ address })) / 1e18;
+      deployed = (await pub.getCode({ address }).catch(() => "0x")) !== "0x";
+    } catch { /* offline — still show the address */ }
+    return {
+      ok: true, hasKey: Boolean(rec.sessionKeyEnc), schema: 2,
+      grantStatus: rec.grantStatus || "none",
+      ownerEoa: getAddress(rec.ownerEoa),
+      signerMode: user.signer_mode || "copilot",
+      address, eth, usd, deployed,
+    };
+  }
   // Unified resolver (2026-09-18): registry first, users-table legacy
   // fallback — settings and the slideout now ALWAYS show the same wallet.
   const sessionKey = await resolveUserSessionKeyAsync(userId);
