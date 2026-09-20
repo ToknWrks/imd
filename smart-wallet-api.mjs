@@ -25,7 +25,7 @@ import { getChain, getEthUsdPriceFor } from "./chains.mjs";
 import { getErc20Balance, getImdPerEth } from "./dip-swap.mjs";
 import { resolveSigner, invalidateSigner } from "./signer.mjs";
 import { getSmartAccountClient, invalidateSmartAccountClient, gasReserveWei, explainUserOpError, predictEoaOwnedScwAddress, ssvModuleAddress, MAV2_FACTORY, userOpDigest, packUOSignature, ENTRY_POINT_V7 } from "./smart-account.mjs";
-import { createPublicClient, http, getAddress, encodeFunctionData, parseAbi, formatEther, formatUnits, parseUnits, concat, padHex, toHex } from "viem";
+import { createPublicClient, http, getAddress, encodeFunctionData, encodeAbiParameters, parseAbi, formatEther, formatUnits, parseUnits, concat, padHex, toHex, getContract } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { getWalletRecord, setWalletRecord, isV2Record } from "./smart-wallet-registry.mjs";
 
