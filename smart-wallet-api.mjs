@@ -383,10 +383,16 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
   return out;
 }
 
-/** POST /api/smart-wallet/activate — owner-paid factory deploy (rangedesk pattern).
- *  Hosted has NO server-side key by design, so when `browserFrom` is supplied
- *  (and no env signer exists) this returns the UNSIGNED factory call for the
- *  user's browser wallet to sign — the user's EOA pays the deploy gas. */
+/** POST /api/smart-wallet/activate — factory deploy signed BY THE SESSION KEY.
+ *  WHO SIGNS: the account OWNER = the session-key EOA (Phase 1 design). The
+ *  MA v2 factory SILENTLY NO-OPS when msg.sender ≠ owner (CLAUDE.md:
+ *  "UO construction succeeded ≠ deploy path works" — cost 0.0008 ETH to learn;
+ *  confirmed live again 2026-09-19: a browser-signed deploy from the user's
+ *  EOA succeeded on-chain with 25.5k gas, zero logs, no code deployed). So the
+ *  deploy is sent server-side WITH THE USER'S SESSION KEY (decrypted via
+ *  MASTER_KEY) — msg.sender = owner, gas paid from the session-key EOA, and
+ *  the UI tells the user to fund THAT address. `browserFrom` is accepted for
+ *  API compat but signing never happens in the browser for activation. */
 export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null, userId = null } = {}) {
   const dep = getChain(chainKey);
   const pub = await publicClientFor(chainKey);
@@ -397,18 +403,12 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
   if (code && code !== "0x") return { ok: true, alreadyDeployed: true, address };
 
   const factoryAbi = parseAbi(["function createSemiModularAccount(address owner, uint256 salt) returns (address)"]);
-  // The account owner is the session key EOA. The AA SDK does NOT reliably
-  // expose it (scw.account.owner was undefined in production — the guard below
-  // fired on the first hosted activation attempt, 2026-09-19), so derive it
-  // the authoritative way: from the USER'S OWN registry session key. Never
-  // fall back to the SCW address — deploying an account owned by itself
-  // bricks it.
-  let sessionKeyAddress = scw.account.owner?.address ? getAddress(scw.account.owner.address) : null;
-  if (!sessionKeyAddress) {
-    const sk = await resolveUserSessionKeyAsync(userId);
-    if (!sk) throw new Error("cannot determine the smart wallet's owner — no registry session key for this user (was the wallet generated in-app?)");
-    sessionKeyAddress = getAddress(privateKeyToAccount(sk).address);
-  }
+  // The owner is the session-key EOA, derived from the USER'S registry key.
+  // The AA SDK does not reliably expose it (scw.account.owner was undefined in
+  // production). NEVER fall back to the SCW address — self-owned = bricked.
+  const sessionKey = await resolveUserSessionKeyAsync(userId);
+  if (!sessionKey) throw new Error("cannot determine the smart wallet's owner — no registry session key for this user (was the wallet generated in-app?)");
+  const sessionKeyAddress = getAddress(privateKeyToAccount(sessionKey).address);
   const FACTORY = "0x00000000000017c61b5bEe81050EC8eFc9c6fecd";
   const callData = encodeFunctionData({
     abi: factoryAbi,
@@ -416,21 +416,38 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
     args: [sessionKeyAddress, 0n],
   });
 
-  if (browserFrom) {
-    if (!/^0x[0-9a-fA-F]{40}$/.test(browserFrom)) throw new Error("invalid browserFrom address");
-    return { ok: true, browserSign: true, factory: FACTORY, callData, owner: sessionKeyAddress, scwAddress: address };
+  // Gas is paid by the session-key EOA (msg.sender must equal owner). Require
+  // it to hold enough before sending — a failed/reverted deploy burns gas for
+  // nothing, and the silent no-op variant doesn't even revert.
+  const payerBal = await pub.getBalance({ address: sessionKeyAddress }).catch(() => 0n);
+  const minGasWei = 500_000n * 20n * 10n ** 9n; // 500k gas × 20 gwei ≈ 0.01 ETH
+  if (payerBal < minGasWei) {
+    return {
+      ok: false,
+      needsGas: true,
+      gasPayer: sessionKeyAddress,
+      gasPayerBalanceEth: Number(payerBal) / 1e18,
+      message: `Activation is signed by the wallet's own gas key (the factory ignores anyone else — msg.sender must be the account owner). Fund the gas key ${sessionKeyAddress} with ~0.002 ETH, then click Activate again.`,
+    };
   }
 
-  // Server-signed path (local dev / legacy raw-key owner) — unchanged.
-  const owner = await resolveOwnerSigner(chainKey);
-  const txHash = await owner.callContract({
-    address: FACTORY,
-    abi: factoryAbi,
-    functionName: "createSemiModularAccount",
-    args: [sessionKeyAddress, 0n],
+  // Server signs WITH THE SESSION KEY so msg.sender == owner.
+  const { createWalletClient } = await import("viem");
+  const account = privateKeyToAccount(sessionKey);
+  const walletClient = createWalletClient({ account, chain: dep.viemChain, transport: http(dep.httpRpc()) });
+  const txHash = await walletClient.sendTransaction({
+    account,
+    chain: dep.viemChain,
+    to: FACTORY,
+    data: callData,
+    value: 0n,
   });
   const receipt = await pub.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== "success") throw new Error("deploy tx reverted: " + txHash);
+  // Post-deploy verification — catches the silent no-op class even if the
+  // factory's guard ever changes.
+  const codeAfter = await pub.getCode({ address }).catch(() => "0x");
+  if (!codeAfter || codeAfter === "0x") throw new Error("deploy tx mined but no code at " + address + " — factory no-oped (msg.sender ≠ owner?)");
   return { ok: true, address, txHash };
 }
 

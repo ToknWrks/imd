@@ -77,12 +77,21 @@ const CHILD_SNIPPET = `
   let r;
   try {
     // owner= undefined on the SDK client (production reality) — the registry
-    // key path must supply the owner. Stub returns a key whose EOA is 0xeee…1.
+    // key path must supply the owner/gas-payer. Stub key EOA: 0x19E7…ff2A,
+    // whose balance is 0 in the stub, so the EXPECTED result is needsGas.
     r = await mod.activateSmartWallet("ethereum", { browserFrom: from, userId });
   } catch (e) {
     // The one failure mode this test exists to catch: a scope/reference bug.
     if (e instanceof ReferenceError || /is not defined/.test(String(e))) { console.error("REFERENCE_ERROR:" + e.message); process.exit(2); }
     console.error("OTHER_ERROR:" + e.message); process.exit(3);
+  }
+  // Correct contract: the function refuses to send a deploy the gas key can't
+  // afford, and names the gas-payer address — never a silent no-op.
+  if (r.needsGas) {
+    if (r.gasPayer !== "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A") { console.error("WRONG_GAS_PAYER:" + r.gasPayer); process.exit(9); }
+    if (r.gasPayer === "0x" + "9".repeat(40)) { console.error("GAS_PAYER_IS_SCW"); process.exit(10); }
+    console.log("ACTIVATE_NEEDS_GAS_OK");
+    process.exit(0);
   }
   if (!r.ok || r.browserSign !== true) { console.error("BAD_PAYLOAD:" + JSON.stringify(r).slice(0, 200)); process.exit(4); }
   if (!/^0x[0-9a-fA-F]{40}$/.test(r.factory) || !/^0x[0-9a-fA-F]{40}$/.test(r.owner)) { console.error("BAD_ADDR:" + JSON.stringify(r).slice(0, 200)); process.exit(5); }
@@ -124,5 +133,5 @@ test("activateSmartWallet browser path returns a signable payload (no ReferenceE
     "--import", "./scripts/test-loader.mjs",
     SNIPPET_PATH,
   ], { encoding: "utf8" });
-  assert.match(out, /ACTIVATE_BROWSER_PATH_OK/);
+  assert.match(out, /(ACTIVATE_NEEDS_GAS_OK|ACTIVATE_BROWSER_PATH_OK)/);
 });

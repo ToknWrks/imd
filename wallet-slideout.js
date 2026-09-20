@@ -378,6 +378,25 @@ async function swActivate(){
   try{
     var r=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
     var j=await r.json();
+    if(j.needsGas){
+      // The deploy is signed by the wallet's own gas key (msg.sender must be
+      // the account owner or the factory silently no-ops). Tell the user
+      // exactly what to fund — the SCW balance is irrelevant for this.
+      _swStatus(j.message,false,true);
+      if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
+      // Show the gas-key address prominently + a copy button.
+      var host=document.getElementById('smartWalletSection');
+      if(host && j.gasPayer){
+        var note=document.createElement('div');
+        note.className='sw-card';note.style.gridColumn='1/-1';note.style.marginTop='0.6rem';
+        note.innerHTML='<b style="color:#e8b661">Fund the gas key to activate</b>'+
+          '<div class="sw-addr" style="margin-top:0.35rem"><span>'+_swAddr(j.gasPayer)+'</span>'+
+          '<button type="button" class="sw-copy" data-addr="'+_we(j.gasPayer)+'" onclick="swCopyAddr(this)" title="Copy gas-key address">\u29c9</button></div>'+
+          '<div class="hint" style="margin-top:0.25rem">~0.002 ETH covers the mainnet deploy. Current balance: '+_wfu(j.gasPayerBalanceEth)+' ETH. Activation is signed by this key because the factory requires msg.sender = owner.</div>';
+        host.insertBefore(note, host.querySelector('.sw-status'));
+      }
+      return;
+    }
     if(!j.ok)throw new Error(j.error||'deploy failed');
     if(j.browserSign){
       if(!window.ethereum){_swStatus('no browser wallet connected',false,true);if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}return;}
