@@ -349,15 +349,30 @@ function _swStatus(msg,busy,err){
 }
 async function swActivate(){
   var btn=event&&event.target;
-  if(btn){btn.disabled=true;btn.textContent='Activating\u2026';}
-  _swStatus('deploying smart wallet (owner pays gas)\u2026',true);
+  if(btn){btn.disabled=true;btn.textContent='Activating…';}
+  // NOTE: on hosted the deploy is signed by YOUR browser wallet (the user's
+  // EOA pays the factory deploy gas — roughly $1-5 on mainnet). The server
+  // holds no key by design; it only returns the unsigned factory call.
+  _swStatus('preparing deploy…',true);
   try{
-    var r=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum'})});
+    var r=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
     var j=await r.json();
     if(!j.ok)throw new Error(j.error||'deploy failed');
-    _swStatus(j.alreadyDeployed?'\u2713 already deployed':'\u2713 deployed — '+ (j.txHash||'').slice(0,10)+'\u2026');
+    if(j.browserSign){
+      if(!window.ethereum){_swStatus('no browser wallet connected',false,true);if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}return;}
+      _swStatus('signing deploy in your wallet… (gas paid from your wallet)',true);
+      var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:_wcAddress||j.owner,to:j.factory,data:j.callData,chainId:chainIdHexFor(_swState?_swState.chain:'ethereum')}]});
+      _swStatus('\u2713 deploy sent — tx '+(txHash||'').slice(0,10)+'… reloading…');
+      setTimeout(function(){openWallet();},2500);
+      return;
+    }
+    _swStatus(j.alreadyDeployed?'\u2713 already deployed':'\u2713 deployed — '+ (j.txHash||'').slice(0,10)+'…');
     setTimeout(function(){openWallet();},1800);
-  }catch(e){_swStatus(String(e.message||e).slice(0,180),false,true); if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}}
+  }catch(e){
+    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);}
+    else _swStatus(String(e.message||e).slice(0,180),false,true);
+    if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
+  }
 }
 function closeWallet(){document.getElementById('walletOverlay').classList.remove('open');}
 async function refreshWallet(btn){

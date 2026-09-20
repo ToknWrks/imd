@@ -353,6 +353,7 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
     scw,
     dollarSymbol: dollarSymbol(chainKey),
     dollarToken: getChain(chainKey).dollar,
+    imdToken: getChain(chainKey).imdToken || null,
   };
   // Live max-sendable: build the outbound UO (no send) and subtract its exact
   // gas cost from the SCW's balance. Errors are non-fatal — UI falls back to
@@ -382,8 +383,11 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
   return out;
 }
 
-/** POST /api/smart-wallet/activate — owner-paid factory deploy (rangedesk pattern). */
-export async function activateSmartWallet(chainKey = "ethereum") {
+/** POST /api/smart-wallet/activate — owner-paid factory deploy (rangedesk pattern).
+ *  Hosted has NO server-side key by design, so when `browserFrom` is supplied
+ *  (and no env signer exists) this returns the UNSIGNED factory call for the
+ *  user's browser wallet to sign — the user's EOA pays the deploy gas. */
+export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null } = {}) {
   const dep = getChain(chainKey);
   const pub = await publicClientFor(chainKey);
   const scw = await getSmartAccountClient(chainKey);
@@ -392,15 +396,31 @@ export async function activateSmartWallet(chainKey = "ethereum") {
   const code = await pub.getCode({ address }).catch(() => "0x");
   if (code && code !== "0x") return { ok: true, alreadyDeployed: true, address };
 
-  // Deploy via a direct factory call signed by the OWNER (rangedesk pattern:
-  // createSemiModularAccount(owner, salt) — owner pays gas, no paymaster).
-  const owner = await resolveOwnerSigner(chainKey);
   const factoryAbi = parseAbi(["function createSemiModularAccount(address owner, uint256 salt) returns (address)"]);
   // The owner of the account is the session key EOA in Phase 1 (see the
   // honesty note in smart-account.mjs) — pass ITS address as owner.
-  const sessionKeyAddress = scw.account.owner?.address ?? owner.address;
+  // GUARD: if the SDK exposes no owner, do NOT fall back to the SCW address —
+  // deploying an account owned by itself bricks it. Refuse loudly instead.
+  const sessionKeyAddress = scw.account.owner?.address ? getAddress(scw.account.owner.address) : null;
+  if (!sessionKeyAddress) {
+    throw new Error("smart-account SDK exposed no account owner — refusing to build a deploy that could mint an ownerless/self-owned account");
+  }
+  const FACTORY = "0x00000000000017c61b5bEe81050EC8eFc9c6fecd";
+  const callData = encodeFunctionData({
+    abi: factoryAbi,
+    functionName: "createSemiModularAccount",
+    args: [sessionKeyAddress, 0n],
+  });
+
+  if (browserFrom) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(browserFrom)) throw new Error("invalid browserFrom address");
+    return { ok: true, browserSign: true, factory: FACTORY, callData, owner: sessionKeyAddress, scwAddress: address };
+  }
+
+  // Server-signed path (local dev / legacy raw-key owner) — unchanged.
+  const owner = await resolveOwnerSigner(chainKey);
   const txHash = await owner.callContract({
-    address: "0x00000000000017c61b5bEe81050EC8eFc9c6fecd",
+    address: FACTORY,
     abi: factoryAbi,
     functionName: "createSemiModularAccount",
     args: [sessionKeyAddress, 0n],
