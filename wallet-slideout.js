@@ -371,9 +371,9 @@ function _swStatus(msg,busy,err){
 async function swActivate(){
   var btn=event&&event.target;
   if(btn){btn.disabled=true;btn.textContent='Activating…';}
-  // NOTE: on hosted the deploy is signed by YOUR browser wallet (the user's
-  // EOA pays the factory deploy gas — roughly $1-5 on mainnet). The server
-  // holds no key by design; it only returns the unsigned factory call.
+  // The deploy is signed SERVER-SIDE with the session key (msg.sender must be
+  // the account owner — the factory silently no-ops for anyone else). Your
+  // browser wallet is never prompted; the gas-key EOA pays and may need funding.
   _swStatus('preparing deploy…',true);
   try{
     var r=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
@@ -398,16 +398,10 @@ async function swActivate(){
       return;
     }
     if(!j.ok)throw new Error(j.error||'deploy failed');
-    if(j.browserSign){
-      if(!window.ethereum){_swStatus('no browser wallet connected',false,true);if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}return;}
-      _swStatus('signing deploy in your wallet… (gas paid from your wallet)',true);
-      var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:_wcAddress||j.owner,to:j.factory,data:j.callData,chainId:chainIdHexFor(_swState?_swState.chain:'ethereum')}]});
-      _swStatus('\u2713 deploy sent — tx '+(txHash||'').slice(0,10)+'… reloading…');
-      setTimeout(function(){openWallet();},2500);
-      return;
-    }
-    _swStatus(j.alreadyDeployed?'\u2713 already deployed':'\u2713 deployed — '+ (j.txHash||'').slice(0,10)+'…');
-    setTimeout(function(){openWallet();},1800);
+    // The deploy is signed SERVER-SIDE with the session key (owner-only
+    // factory). The browser wallet is never prompted for activation.
+    _swStatus(j.alreadyDeployed?'\u2713 already deployed':'\u2713 deploy sent — tx '+(j.txHash||'').slice(0,10)+'…');
+    setTimeout(function(){openWallet();},2500);
   }catch(e){
     if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);}
     else _swStatus(String(e.message||e).slice(0,180),false,true);
