@@ -256,31 +256,37 @@ async function swMove(direction,asset){
   if(!input||!_swState){return;}
   var amount=parseFloat(input.value);
   if(!(amount>0)){_swStatus('enter an amount');return;}
-  // Browser-wallet funding: sign the transfer client-side (EIP-1193), then the
-  // server just relays nothing — the tx goes straight to the chain from the
-  // extension. The server's role is balance status only. No key material moves.
-  if(direction==='in' && _wcAddress){
-    if(!window.ethereum){_swStatus('no browser wallet connected',false,true);return;}
+  // Browser-wallet funding: sign the transfer client-side (EIP-1193). The tx
+  // goes straight to the chain from the extension; the server's role is balance
+  // status only. No key material moves.
+  // The from-address is ALWAYS the extension's ACTIVE account, resolved fresh
+  // here — never the page-load-cached session address. Signing with a stale
+  // identity produced "from should be same as current address" (2026-09-19):
+  // the user switched accounts after sign-in and the extension rejected the tx.
+  if(direction==='in' && window.ethereum && _wcAddress){
     var scwAddr=_swState.scw&&_swState.scw.address;
     if(!scwAddr){_swStatus('smart wallet not ready',false,true);return;}
-    var chainIdHex=_swState.chain==='base'?'0x2105':(_swState.chain==='robinhood'?'0x1237':'0x1');
-    _swStatus('signing in your wallet\u2026',true);
+    _swStatus('checking active account…',true);
     try{
-      var txHash;
-      if(asset==='eth'){
-        var weiEth='0x'+Math.round(amount*1e18).toString(16);
-        txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:_wcAddress,to:scwAddr,value:weiEth,chainId:chainIdHexFor(_swState.chain)}]});
-      }else{
-        // ERC-20 transfer via data field — balance read for sanity first.
-        var dec=_swState.scw.dollarDecimals!=null?_swState.scw.dollarDecimals:6;
-        var raw='0x'+BigInt(Math.round(amount*(10**dec))).toString(16).padStart(64,'0');
-        var toPadded=scwAddr.replace(/^0x/,'').toLowerCase().padStart(64,'0');
-        // transfer(address,uint256) selector = a9059cbb
-        var data='0xa9059cbb'+toPadded+raw;
-        var tokenAddr=_swState.dollarToken;
-        if(!tokenAddr){_swStatus('no '+dsym+' token configured on this chain',false,true);return;}
-        txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:_wcAddress,to:tokenAddr,data:data,chainId:chainIdHexFor(_swState.chain)}]});
+      var accts=await window.ethereum.request({method:'eth_requestAccounts'});
+      var from=accts&&accts[0];
+      if(!from){_swStatus('no account active in your wallet',false,true);return;}
+      if(_wcAddress && from.toLowerCase()!==_wcAddress.toLowerCase()){
+        // Not an error — the SCW receives from anyone — but say it plainly.
+        _swStatus('signing with '+from.slice(0,6)+'\u2026 (switched from '+_wcAddress.slice(0,6)+'\u2026)',true);
       }
+      var txParams;
+      if(asset==='eth'){
+        txParams=fundingTxParams({from:from,scwAddress:scwAddr,asset:'eth',amount:amount,chain:_swState.chain});
+      }else{
+        // IMD funds the IMD token; anything else falls back to the dollar token.
+        var tokenAddr=asset==='imd'?(_swState.imdToken||null):(_swState.dollarToken||null);
+        var tokenDec=asset==='imd'?18:(_swState.scw&&_swState.scw.dollarDecimals!=null?_swState.scw.dollarDecimals:6);
+        if(!tokenAddr){_swStatus('no '+_we(asset==='imd'?imdSym:dsym)+' token configured on this chain',false,true);return;}
+        txParams=fundingTxParams({from:from,scwAddress:scwAddr,asset:'erc20',amount:amount,chain:_swState.chain,tokenAddress:tokenAddr,tokenDecimals:tokenDec});
+      }
+      _swStatus('signing in your wallet\u2026',true);
+      var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[txParams]});
       _swStatus('\u2713 sent from your wallet \u2014 tx '+(txHash||'').slice(0,10)+'\u2026 reloading\u2026');
       setTimeout(function(){openWallet();},2200);
     }catch(e){
