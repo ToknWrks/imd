@@ -27,6 +27,6 @@ const [code, bal, nonce] = await Promise.all([
 ]);
 console.log("owner :        ", owner);
 console.log("SCW  :         ", scw);
-console.log("deployed:      ", code !== "0x" ? "YES (code " + code.slice(0, 10) + "…)" : "no");
+console.log("deployed:      ", code && code !== "0x" ? "YES" : "no");
 console.log("balance ETH:   ", Number(bal) / 1e18);
 console.log("outgoing nonce:", nonce, "(0 = SCW has never sent anything)");
