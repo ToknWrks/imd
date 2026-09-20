@@ -4,9 +4,10 @@
 import { insertSniperTrade, getSniperTokenHistory, touchSniperToken, getSniperRecentTokens, getSniperActiveToken, armSniperAutoSell, cancelSniperAutoSells, getSniperAutoSells, getArmedSniperAutoSells, getDipWatchers, setSniperTokenVerified, getSniperTokenVerification } from "./db.mjs";
 import { netCostEthFor, sniperLedgerStats } from "./sniper-autosell.mjs";
 import { discoverPools, executeSniperBuy, getEthUsd, getTokenMeta } from "./sniper-swap.mjs";
-import { resolveSigner } from "./signer.mjs";
+import { resolveSigner, resolveSignerUser } from "./signer.mjs";
 import {
   getQuoteContext,
+  getQuoteContextMulti,
   getTokenBalance,
   getSniperPosition,
   getApprovals,
@@ -71,9 +72,14 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   if (url === "/sniper" && method === "GET") {
     let ctx = { chain: "ethereum", ethUsd: 0, ethBalance: 0, usdcBalance: 0, ethUsdValue: 0, imdPerEth: 0 };
     try {
-      let owner = readWallet;
-      if (!owner) { try { owner = (await resolveSigner("ethereum")).address; } catch {} }
-      ctx = { chain: "ethereum", ...(await getQuoteContext("ethereum", owner)) };
+    // Total balance across the user's wallets (SCW + EOA, 2026-09-20); legacy
+    // fallback resolves the global signer's address (read-only context).
+    let pageWallets = readWallets ?? (readWallet ? [readWallet] : null);
+    if (!pageWallets) {
+      pageWallets = [];
+      try { pageWallets.push((await resolveSigner("ethereum")).address); } catch {}
+    }
+    ctx = { chain: "ethereum", ...(await getQuoteContextMulti("ethereum", pageWallets)) };
     } catch {}
     // The bot's current target: active token auto-resumes on page load.
     ctx.activeToken = getSniperActiveToken("ethereum");
@@ -97,9 +103,15 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const body = JSON.parse(await readBody());
       const chainKey = body.chain || "ethereum";
       if (!SNIPER_CHAINS.includes(chainKey)) { json({ ok: false, error: "unsupported chain" }); return true; }
-      let owner = readWallet;
-      if (!owner) { try { owner = (await resolveSigner(chainKey)).address; } catch {} }
-      json({ ok: true, ...(await getQuoteContext(chainKey, owner)) });
+      // Balance = the user's TOTAL (SCW + browser EOA, 2026-09-20) — the old
+      // single-wallet read showed readWallets[0] (the SCW) only, so ETH funded
+      // into the EOA (or vice versa) never appeared and buys looked blocked.
+      // Legacy fallback (no session wallets): the global signer's address.
+      let ctxWallets = readWallets ?? (readWallet ? [readWallet] : null);
+      if (!ctxWallets) {
+        try { ctxWallets = [(await resolveSigner(chainKey)).address]; } catch {}
+      }
+      json({ ok: true, ...(await getQuoteContextMulti(chainKey, ctxWallets)) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
   }
@@ -126,7 +138,10 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token, symbol, decimals, ethAmount, slippagePct, pool, maxGasGwei } = body;
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      const signer = wrapSignerGas(await resolveSigner(chainKey), maxGasGwei);
+      // Per-user signer (2026-09-20) — the global resolveSigner() derived an
+      // orphan account on hosted; buys must sign from the user's own wallet
+      // (autonomy: their registry SCW; co-pilot: the approval modal).
+      const signer = wrapSignerGas(await resolveSignerUser(uid, chainKey), maxGasGwei);
       const amountWei = BigInt(Math.round(parseFloat(ethAmount) * 1e18));
       const bal = await signer.getEthBalanceWei();
       if (bal < amountWei) throw new Error(`insufficient ETH (have ${Number(bal)/1e18}, need ${ethAmount})`);
@@ -179,7 +194,8 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token, pool, probeEth } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      const signer = await resolveSigner(chainKey);
+      // Per-user signer (2026-09-20) — the probe sells the USER's position.
+      const signer = await resolveSignerUser(uid, chainKey);
       const bal = await getTokenBalance(chainKey, token, signer.address);
       if (!(bal.formatted > 0)) { json({ ok: false, error: "no balance to probe — buy first (the probe sells a slice of your position)" }); return true; }
       // Probe size: ~$1 of the position (capped at 5% so a huge position
@@ -225,7 +241,8 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const PROBE_USD = 1;
       let probeEth = 0.001; // fallback ~$2.5 on mainnet, ~$0.01-scale on 4663 gas-wise
       if (ethUsd > 0) probeEth = Math.min(0.01, PROBE_USD / ethUsd);
-      const signer = wrapSignerGas(await resolveSigner(chainKey), maxGasGwei);
+      // Per-user signer (2026-09-20) — same rule as the buy route.
+      const signer = wrapSignerGas(await resolveSignerUser(uid, chainKey), maxGasGwei);
       const bal0 = await signer.getEthBalanceWei().catch(() => 0n);
       if (bal0 < BigInt(Math.round(probeEth * 1e18))) { json({ ok: false, error: "insufficient ETH for the probe" }); return true; }
 
@@ -289,7 +306,9 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   if (url === "/api/sniper/approvals" && method === "POST") {
     try {
       const { chain, token } = JSON.parse(await readBody());
-      const signer = await resolveSigner(chain || "base");
+      // Approvals are the USER's wallet state (2026-09-20) — resolve their
+      // signer's address, not the global env signer's.
+      const signer = await resolveSignerUser(uid, chain || "base");
       json({ ok: true, rows: await getApprovals(chain || "base", signer.address, token) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
@@ -298,7 +317,8 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   if (url === "/api/sniper/approve" && method === "POST") {
     try {
       const { chain, token, spender, maxGasGwei } = JSON.parse(await readBody());
-      const signer = wrapSignerGas(await resolveSigner(chain || "base"), maxGasGwei);
+      // Per-user signer (2026-09-20) — same rule as the buy route.
+      const signer = wrapSignerGas(await resolveSignerUser(uid, chain || "base"), maxGasGwei);
       json({ ok: true, txHash: await approveSpender(signer, token, spender) });
       return true;
     } catch (e) { json({ ok: false, error: e.message }); return true; }
@@ -427,7 +447,8 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token, sellPct, slippagePct, maxGasGwei, pool } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      const signer = wrapSignerGas(await resolveSigner(chainKey), maxGasGwei);
+      // Per-user signer (2026-09-20) — same rule as the buy route.
+      const signer = wrapSignerGas(await resolveSignerUser(uid, chainKey), maxGasGwei);
       const bal = await getTokenBalance(chainKey, token, signer.address);
       const pct = Math.min(100, Math.max(1, parseFloat(sellPct) || 100));
       const amountHuman = bal.formatted * (pct / 100);
@@ -495,13 +516,10 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      // Sync reads the USER's wallet (2026-09-18) — the session user's SCW /
-      // connected wallet, not the global env signer.
-      const wallet = readWallet || (await resolveSigner(chainKey)).address;
-      // Scan EVERY read wallet (2026-09-19): launchpad/curve buys execute from
-      // the browser EOA while app-signed trades hit the SCW — syncing one
-      // wallet alone misses the other's external trades entirely.
-      const wallets = readWallets ?? (wallet ? [wallet] : null) ?? [(await resolveSigner(chainKey)).address];
+      // Sync reads the USER's wallets (2026-09-18/20) — the session user's SCW
+      // + browser EOA, not the global env signer.
+      const syncWallets = readWallets ?? (readWallet ? [readWallet] : null);
+      const wallets = syncWallets ?? [(await resolveSignerUser(uid, chainKey)).address];
       // SEQUENTIAL, not parallel: the dedupe set (known tx hashes) is read at
       // the start of each sync — two concurrent syncs would both see an empty
       // set and double-insert any tx touching both wallets (e.g. a transfer

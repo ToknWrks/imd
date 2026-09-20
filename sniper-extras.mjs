@@ -218,26 +218,36 @@ function spenders(n) {
 }
 
 export async function getQuoteContext(chainKey, owner) {
+  return getQuoteContextMulti(chainKey, owner ? [owner] : null);
+}
+
+/**
+ * Quote context with the balance summed across ALL provided wallets (SCW +
+ * browser EOA, 2026-09-20) — a single-wallet read understated the sniper's
+ * ETH/USD balances whenever funds sat on the other side of the custody
+ * boundary. wallets=null → zeros (no owner context).
+ */
+export async function getQuoteContextMulti(chainKey, wallets) {
   const c = publicClient(chainKey);
   const ethUsd = await getEthUsd(chainKey);
   let ethBal = 0;
   let usdcBal = 0;
-  if (owner) {
+  if (wallets?.length) {
     // USDC map has no Robinhood entry — read the chain registry's dollar
     // token (USDG on 4663) with its real decimals instead of crashing.
     const usdcAddress = USDC[chainKey]?.address ?? getChain(chainKey).dollar;
     const usdcDecimals = USDC[chainKey]?.decimals ?? getChain(chainKey).dollarDecimals ?? 6;
-    const [wei, usdcRaw] = await Promise.all([
-      c.getBalance({ address: owner }),
-      c.readContract({
+    const [weis, usdcRaws] = await Promise.all([
+      Promise.all(wallets.map((a) => c.getBalance({ address: a }).catch(() => 0n))),
+      Promise.all(wallets.map((a) => c.readContract({
         address: usdcAddress,
         abi: ERC20_ABI,
         functionName: "balanceOf",
-        args: [owner],
-      }).catch(() => 0n),
+        args: [a],
+      }).catch(() => 0n))),
     ]);
-    ethBal = Number(wei) / 1e18;
-    usdcBal = Number(usdcRaw) / 10 ** usdcDecimals;
+    ethBal = weis.reduce((s, w) => s + Number(w ?? 0n), 0) / 1e18;
+    usdcBal = usdcRaws.reduce((s, r) => s + Number(r ?? 0n), 0) / 10 ** usdcDecimals;
   }
   // Live ETH/IMD pool rate (60s server cache in dip-swap) — the sniper's IMD
   // base-denomination converts through this. Non-critical display data: a
