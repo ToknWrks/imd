@@ -206,16 +206,16 @@ function renderSmartWalletSection(){
   h+=_swAddrRow(browserWallet||owner.address);
   // ETH row
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(owner.eth)+'</span>'+usd(owner.eth!=null?owner.eth*ethUsd:null)+'</div>';
-  h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(\'swInEthHint\',\'eth\',this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
-  h+=_hintRow('swInEthHint','eth');
+  h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
+  h+=swHintRow('swInEthHint');
   // USD row
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca">$</span><span>'+dsym+'</span><span class="amount">'+bal(owner.usd)+'</span>'+usd(owner.usd)+'</div>';
   h+='<div class="sw-move-row"><input id="swInUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','usd')" + '">Fund \u2192</button></div>';
   // IMD row (only when the chain has IMD configured)
   if(s.imdPerEth!==undefined){
     h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(owner.imd)+'</span>'+usd(owner.imd!=null&&imdUsd>0?owner.imd*imdUsd:null)+'</div>';
-    h+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(\'swInImdHint\',\'imd\',this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
-    h+=_hintRow('swInImdHint','imd');
+    h+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
+    h+=swHintRow('swInImdHint');
   }
   if(browserWallet){
     h+='<div class="hint" style="margin-top:0.4rem;font-size:0.68rem">Funding signs in your browser wallet \u2014 keys never leave it.</div>';
@@ -225,15 +225,15 @@ function renderSmartWalletSection(){
   h+='<div class="sw-card"><div class="sw-card-title">Smart wallet <span class="hint">AA</span></div>';
   h+=_swAddrRow(scw.address);
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw.eth)+'</span>'+usd(scw.eth!=null?scw.eth*ethUsd:null)+'</div>';
-  h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(\'swOutEthHint\',\'eth\',this.value)"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
-  h+=_hintRow('swOutEthHint','eth');
+  h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
+  h+=swHintRow('swOutEthHint');
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca">$</span><span>'+dsym+'</span><span class="amount">'+bal(scw.usd)+'</span>'+usd(scw.usd)+'</div>';
   h+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn alt" onclick="' + "swMove('out','usd')" + '">\u2190 Move out</button></div>';
   // IMD row on the SCW card too (session-key signed UO move-out)
   if(s.imdPerEth!==undefined){
     h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(scw.imd)+'</span>'+usd(scw.imd!=null&&imdUsd>0?scw.imd*imdUsd:null)+'</div>';
-    h+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(\'swOutImdHint\',\'imd\',this.value)"><button class="sw-btn alt" onclick="' + "swMove('out','imd')" + '">\u2190 Move out</button></div>';
-    h+=_hintRow('swOutImdHint','imd');
+    h+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swOutImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn alt" onclick="' + "swMove('out','imd')" + '">\u2190 Move out</button></div>';
+    h+=swHintRow('swOutImdHint');
   }
   h+='<div class="sw-status" id="swStatus"></div>';
   h+='<div style="margin-top:0.6rem">';
@@ -295,6 +295,8 @@ async function swMove(direction,asset){
 function chainIdHexFor(chain){
   return chain==='base'?'0x2105':(chain==='robinhood'?'0x1237':'0x1');
 }
+// Hint placeholder row (renderSmartWalletSection references this at build time).
+function swHintRow(id){return'<div class="sw-hint" id="'+id+'"></div>';}
 // Live conversion hint under a move input — mirrors the sniper page's usd-line.
 // ETH input → "≈ $x USD"; IMD input → "≈ x ETH · $y USD". Empty/zero → blank.
 function swHint(id,asset,value){
