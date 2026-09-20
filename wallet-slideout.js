@@ -330,6 +330,28 @@ async function swMove(direction,asset){
 function chainIdHexFor(chain){
   return chain==='base'?'0x2105':(chain==='robinhood'?'0x1237':'0x1');
 }
+// Send ETH from the browser wallet to the ACTIVATION gas key (the session-key
+// EOA). Separate from Fund \u2192 (which targets the SCW) \u2014 the two addresses are
+// different and conflating them cost the user a confused funding round.
+async function swFundGas(){
+  if(!window.ethereum||!_swState||!_swState.gasPayer){_swStatus('gas key unknown \u2014 click Activate first',false,true);return;}
+  var inp=document.getElementById('swGasFund');
+  var amount=parseFloat(inp&&inp.value)||0;
+  if(!(amount>0)){_swStatus('enter an amount',false,true);return;}
+  var gasPayer=_swState.gasPayer;
+  _swStatus('signing in your wallet\u2026',true);
+  try{
+    var accts=await window.ethereum.request({method:'eth_requestAccounts'});
+    var from=accts&&accts[0];
+    if(!from){_swStatus('no account active in your wallet',false,true);return;}
+    var wei='0x'+BigInt(Math.round(amount*1e18)).toString(16);
+    var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:from,to:gasPayer,value:wei,chainId:chainIdHexFor(_swState.chain)}]});
+    _swStatus('\u2713 sent to the gas key \u2014 tx '+(txHash||'').slice(0,10)+'\u2026 click Activate once it lands (\u22481 block).');
+  }catch(e){
+    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);return;}
+    _swStatus(String(e.message||e).slice(0,160),false,true);
+  }
+}
 // Hint placeholder row (renderSmartWalletSection references this at build time).
 function swHintRow(id){return'<div class="sw-hint" id="'+id+'"></div>';}
 // Live conversion hint under a move input — mirrors the sniper page's usd-line.
@@ -382,6 +404,7 @@ async function swActivate(){
       // The deploy is signed by the wallet's own gas key (msg.sender must be
       // the account owner or the factory silently no-ops). Tell the user
       // exactly what to fund — the SCW balance is irrelevant for this.
+      _swState.gasPayer=j.gasPayer;   // remember it for swFundGas()
       _swStatus(j.message,false,true);
       if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
       // Show the gas-key address prominently + a copy button. Insert before
@@ -395,9 +418,11 @@ async function swActivate(){
         note.id='gasKeyNote';
         note.className='sw-card';note.style.marginTop='0.6rem';
         note.innerHTML='<b style="color:#e8b661">Fund the gas key to activate</b>'+
-          '<div class="sw-addr" style="margin-top:0.35rem"><span>'+_swAddr(j.gasPayer)+'</span>'+
+          '<div class="sw-addr" style="margin-top:0.35rem"><span title="'+_we(j.gasPayer)+'">'+_swAddr(j.gasPayer)+'</span>'+
           '<button type="button" class="sw-copy" data-addr="'+_we(j.gasPayer)+'" onclick="swCopyAddr(this)" title="Copy gas-key address">\u29c9</button></div>'+
-          '<div class="hint" style="margin-top:0.25rem">~0.002 ETH covers the mainnet deploy. Current balance: '+_wfu(j.gasPayerBalanceEth)+' ETH. Activation is signed by this key because the factory requires msg.sender = owner.</div>';
+          '<div class="sw-move-row" style="margin-top:0.45rem"><input id="swGasFund" type="number" step="0.0001" min="0" placeholder="0.002" value="0.002"><button class="sw-btn" onclick="swFundGas()">Send to gas key \u2192</button></div>'+
+          '<div id="swGasFundHint" class="sw-hint"></div>'+
+          '<div class="hint" style="margin-top:0.25rem">Current gas-key balance: '+_wfu(j.gasPayerBalanceEth)+' ETH. Activation is signed by this key because the factory requires msg.sender = owner. (The Fund \u2192 buttons above send to the smart wallet, NOT to this gas key.)</div>';
         var grid=host.querySelector('.sw-grid');
         if(grid){host.insertBefore(note,grid);}else{host.appendChild(note);}
       }
