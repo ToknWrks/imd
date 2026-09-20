@@ -43,33 +43,48 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
 
     const results = await Promise.allSettled(CHAIN_META.map(async ({ key }) => {
       const dep = getChain(key);
-      let address = readAddress;
-      if (!address) {
+      // Total-holdings reads (2026-09-20): sum ALL of the user's wallets per
+      // chain — registry SCW (app-signed trades) + the login/browser EOA
+      // (launchpad buys) — matching what refreshPositions() does for token
+      // rows. A single-address read understated the slideout total whenever
+      // funds sat on the other side of the custody boundary. The smart-wallet
+      // card still shows the SCW's own balances separately.
+      let addresses;
+      if (readAddress) {
+        const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+        addresses = await resolveUserReadWallets(readAddress, key);
+      } else {
         // Legacy fallback: resolve the CONNECTED-layer wallet (vault/raw key),
         // never the AA smart account — the SCW has its own card in the UI and
         // is not "the user's wallet". invalidateSigner avoids serving a cached
         // AA signer under the current env snapshot.
-        const { invalidateSigner } = await import("./signer.mjs");
+        const { invalidateSigner, resolveSigner } = await import("./signer.mjs");
         const prev = process.env.SMART_ACCOUNT_ACTIVE;
         process.env.SMART_ACCOUNT_ACTIVE = "false";
         invalidateSigner(key);
         try {
           const signer = await resolveSigner(key);
-          address = signer.address;
+          addresses = [signer.address];
         } finally {
           process.env.SMART_ACCOUNT_ACTIVE = prev;
           invalidateSigner(key);
         }
       }
-      const [ethWei, ethPrice, dollarRaw] = await Promise.all([
-        createPublicClient({ chain: dep.viemChain, transport: (await import("viem")).http(dep.httpRpc()) })
-          .getBalance({ address }),
+      const client = createPublicClient({ chain: dep.viemChain, transport: (await import("viem")).http(dep.httpRpc()) });
+      const [ethWei, ethPrice, ...tokenRaws] = await Promise.all([
+        Promise.all(addresses.map((a) => client.getBalance({ address: a }).catch(() => 0n))),
         getEthUsdPriceFor(key),
-        getErc20Balance(dep.dollar, address, key).catch(() => null),
+        ...addresses.map((a) => getErc20Balance(dep.dollar, a, key).catch(() => null)),
+        // IMD balance (ethereum only today) — non-fatal when absent/unreadable.
+        ...(dep.imdToken ? addresses.map((a) => getErc20Balance(dep.imdToken, a, key).catch(() => 0n)) : []),
       ]);
-      const ethBalance = Number(ethWei) / 1e18;
-      // IMD balance (ethereum only today) — non-fatal when absent/unreadable.
-      const imdBalance = dep.imdToken ? Number(await getErc20Balance(dep.imdToken, address, key).catch(() => 0n)) / 1e18 : null;
+      const ethBalance = ethWei.reduce((s, w) => s + Number(w ?? 0n), 0) / 1e18;
+      const dollarCount = addresses.length;
+      const dollarRawParts = tokenRaws.slice(0, dollarCount);
+      const imdRawParts = tokenRaws.slice(dollarCount);
+      const sumRaw = (parts) => parts.reduce((s, r) => s + (r != null ? r : 0n), 0n);
+      const dollarRaw = tokenRaws.length ? sumRaw(dollarRawParts) : null;
+      const imdBalance = dep.imdToken ? Number(sumRaw(imdRawParts)) / 1e18 : null;
       return {
         ethBalance,
         ethUsd: ethBalance * ethPrice,
