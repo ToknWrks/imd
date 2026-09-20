@@ -19,6 +19,8 @@ export function swapPage({ shell }) {
       <swapkit-widget
         api-key="${apiKey}"
         wallets="${WALLETS}"
+        input-asset="ETH.ETH"
+        output-asset="ETH.USDT-0xdAC17F958D2EE523A2206206994597C13D831EC7"
       ></swapkit-widget>
     </div>
   `, "swap");
