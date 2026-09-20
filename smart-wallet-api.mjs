@@ -346,7 +346,7 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
     chain: chainKey,
     ethUsd,
     imdPerEth,
-    imdSymbol: dep.imdSymbol || "IMD",
+    imdSymbol: getChain(chainKey).imdSymbol || "IMD",
     hasSessionKey,
     gasReserveEth: reserve,   // kept for compatibility; max-send now computes live
     owner,
