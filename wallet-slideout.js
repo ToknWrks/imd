@@ -30,7 +30,11 @@ async function openWallet() {
       '<span class="amount">'+_wf(j.eth.total)+' ETH</span>'+
       '<span class="usd">$'+_wfu(j.eth.totalUsd)+'</span>'+
       '</div><div class="wallet-accordion-body">';
-    j.eth.chains.forEach(function(c){
+    // Per-chain rows filtered to ETHEREUM (2026-09-19): robinhood + base
+    // rows removed from the wallet UI — the platform is mainnet-only, and
+    // the legacy chains' balances were zero-row noise. The API still returns
+    // them; this is display filtering only.
+    j.eth.chains.filter(function(c){return c.name==='Ethereum';}).forEach(function(c){
       h+='<div class="wallet-chain-row">'+
         '<span class="chain-icon" style="background:'+c.color+';color:#fff">'+c.initials+'</span>'+
         '<span>'+c.name+(c.error?' <span style="color:#f87171;font-size:0.7rem">\u26a0</span>':'')+'</span>'+
@@ -50,7 +54,7 @@ async function openWallet() {
         '<span class="amount">'+_wf(j.imd.total)+' IMD</span>'+
         '<span class="usd">$'+_wfu(j.imd.totalUsd)+'</span>'+
         '</div><div class="wallet-accordion-body">';
-      j.imd.chains.forEach(function(c){
+      j.imd.chains.filter(function(c){return c.name==='Ethereum';}).forEach(function(c){
         h+='<div class="wallet-chain-row">'+
           '<span class="chain-icon" style="background:'+c.color+';color:#fff">'+c.initials+'</span>'+
           '<span>'+c.name+(c.error?' <span style="color:#f87171;font-size:0.7rem">\u26a0</span>':'')+'</span>'+
@@ -59,23 +63,8 @@ async function openWallet() {
       });
       h+='</div></div>';
     }
-    var dl=j.usd.chains.some(function(c){return c.symbol==='USDG';})?'USD':'USDC';
-    h+='<div class="wallet-accordion">'+
-      '<div class="wallet-accordion-header" onclick="_toggleAccordion(this)">'+
-      '<span class="wallet-token-icon" style="background:#2775ca;color:#fff">$</span>'+
-      '<span>'+dl+'</span>'+
-      '<span class="arrow" style="margin-left:auto">\u25b6</span>'+
-      '<span class="amount">$'+_wfu(j.usd.totalUsd)+'</span>'+
-      '</div><div class="wallet-accordion-body">';
-    j.usd.chains.forEach(function(c){
-      h+='<div class="wallet-chain-row">'+
-        '<span class="chain-icon" style="background:'+c.color+';color:#fff">'+c.initials+'</span>'+
-        '<span>'+c.name+(c.error?' <span style="color:#f87171;font-size:0.7rem">\u26a0</span>':'')+'</span>'+
-        '<span class="amount">'+_wf(c.balance)+' '+_we(c.symbol)+'</span>'+
-        '<span class="usd">$'+_wfu(c.balanceUsd)+'</span>'+
-        '</div>';
-    });
-    h+='</div></div>';
+    // USD/USDC accordion removed (2026-09-19): nothing on this platform pays
+    // in dollars any more (the USDC base toggle went the same way today).
     // Watched tokens from /tokens — balance + USD price + per-chain breakdown
     if (j.tokens && j.tokens.length) {
       h+='<div class="wallet-accordion open">';
@@ -208,9 +197,7 @@ function renderSmartWalletSection(){
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(owner.eth)+'</span>'+usd(owner.eth!=null?owner.eth*ethUsd:null)+'</div>';
   h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
   h+=swHintRow('swInEthHint');
-  // USD row
-  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca">$</span><span>'+dsym+'</span><span class="amount">'+bal(owner.usd)+'</span>'+usd(owner.usd)+'</div>';
-  h+='<div class="sw-move-row"><input id="swInUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','usd')" + '">Fund \u2192</button></div>';
+  // USD row removed (2026-09-19): the platform no longer pays in dollars.
   // IMD row (only when the chain has IMD configured)
   if(s.imdPerEth!==undefined){
     h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(owner.imd)+'</span>'+usd(owner.imd!=null&&imdUsd>0?owner.imd*imdUsd:null)+'</div>';
@@ -227,8 +214,7 @@ function renderSmartWalletSection(){
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw.eth)+'</span>'+usd(scw.eth!=null?scw.eth*ethUsd:null)+'</div>';
   h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
   h+=swHintRow('swOutEthHint');
-  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca">$</span><span>'+dsym+'</span><span class="amount">'+bal(scw.usd)+'</span>'+usd(scw.usd)+'</div>';
-  h+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn alt" onclick="' + "swMove('out','usd')" + '">\u2190 Move out</button></div>';
+  // USD row removed (2026-09-19): the platform no longer pays in dollars.
   // IMD row on the SCW card too (session-key signed UO move-out)
   if(s.imdPerEth!==undefined){
     h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(scw.imd)+'</span>'+usd(scw.imd!=null&&imdUsd>0?scw.imd*imdUsd:null)+'</div>';
