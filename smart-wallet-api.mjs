@@ -345,14 +345,20 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
   // ── v2 records (user-EOA-owned): the SCW address lives in the registry; no
   // session key is needed to read balances. Emit the fields the v2 UI branch
   // consumes (schema, grantStatus, custodyLabel) and read the SCW directly.
+  // The owner card shows the USER'S OWN EOA balances — the login address IS
+  // the owner, so read it as a plain address (no signer resolution needed).
   const rec = uid ? getWalletRecord(uid) : null;
   if (rec && isV2Record(rec)) {
     const scwAddress = getAddress(rec.scwAddress);
+    const ownerEoa = getAddress(rec.ownerEoa);
     const pub = await publicClientFor(chainKey);
-    const [ethWei, code, dollarRaw] = await Promise.all([
+    const dep = getChain(chainKey);
+    const [ethWei, ownerEthWei, code, dollarRaw, ownerUsdRaw] = await Promise.all([
       pub.getBalance({ address: scwAddress }).catch(() => 0n),
       pub.getCode({ address: scwAddress }).catch(() => "0x"),
-      getErc20Balance(getChain(chainKey).dollar, scwAddress, chainKey).catch(() => null),
+      getErc20Balance(dep.dollar, scwAddress, chainKey).catch(() => null),
+      pub.getBalance({ address: ownerEoa }).catch(() => 0n),
+      getErc20Balance(dep.dollar, ownerEoa, chainKey).catch(() => null),
     ]);
     return {
       ok: true,
@@ -360,18 +366,25 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
       schema: 2,
       custodyLabel: "your EOA owns it",
       grantStatus: rec.grantStatus || "none",
-      ownerEoa: getAddress(rec.ownerEoa),
+      ownerEoa,
       hasSessionKey: Boolean(rec.sessionKeyEnc),
+      owner: {
+        address: ownerEoa,
+        eth: Number(ownerEthWei) / 1e18,
+        usd: ownerUsdRaw != null ? Number(ownerUsdRaw) / 10 ** (dep.dollarDecimals ?? 6) : null,
+        dollarDecimals: dep.dollarDecimals ?? 6,
+        imd: null,
+      },
       scw: {
         address: scwAddress,
         eth: Number(ethWei) / 1e18,
         activated: Boolean(code && code !== "0x"),
-        usd: null,
+        usd: dollarRaw != null ? Number(dollarRaw) / 10 ** (dep.dollarDecimals ?? 6) : null,
       },
       gasReserveEth: Number(gasReserveWei(chainKey)) / 1e18,
       dollarSymbol: dollarSymbol(chainKey),
-      dollarToken: getChain(chainKey).dollar,
-      imdToken: getChain(chainKey).imdToken || null,
+      dollarToken: dep.dollar,
+      imdToken: dep.imdToken || null,
     };
   }
 
