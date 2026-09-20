@@ -9,7 +9,7 @@
  * headless behavior.
  */
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
-import { getErc20Balance } from "./dip-swap.mjs";
+import { getErc20Balance, getImdPerEth } from "./dip-swap.mjs";
 import { getDipWatchers } from "./db.mjs";
 import { createPublicClient, http } from "viem";
 
@@ -68,21 +68,30 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
         getErc20Balance(dep.dollar, address, key).catch(() => null),
       ]);
       const ethBalance = Number(ethWei) / 1e18;
+      // IMD balance (ethereum only today) — non-fatal when absent/unreadable.
+      const imdBalance = dep.imdToken ? Number(await getErc20Balance(dep.imdToken, address, key).catch(() => 0n)) / 1e18 : null;
       return {
         ethBalance,
         ethUsd: ethBalance * ethPrice,
         dollarBalance: dollarRaw != null ? Number(dollarRaw) / (10 ** dep.dollarDecimals) : null,
+        imdBalance,
       };
     }));
 
-    const ethChains = [], usdChains = [];
-    let ethTotal = 0, ethTotalUsd = 0, usdTotalUsd = 0;
+    const ethChains = [], usdChains = [], imdChains = [];
+    let ethTotal = 0, ethTotalUsd = 0, usdTotalUsd = 0, imdTotal = 0;
     results.forEach((r, i) => {
       const meta = CHAIN_META[i];
       const err = r.status === "rejected" ? (r.reason?.message?.slice(0, 60) || "unavailable") : null;
-      const bal = r.status === "fulfilled" ? r.value : { ethBalance: null, ethUsd: null, dollarBalance: null };
+      const bal = r.status === "fulfilled" ? r.value : { ethBalance: null, ethUsd: null, dollarBalance: null, imdBalance: null };
       ethChains.push({ name: meta.name, initials: meta.initials, color: meta.color, balance: bal.ethBalance, balanceUsd: bal.ethUsd, error: err });
       usdChains.push({ name: meta.name, initials: meta.initials, color: meta.color, symbol: meta.dollarSymbol, balance: bal.dollarBalance, balanceUsd: bal.dollarBalance, error: err ?? (bal.dollarBalance == null ? "balanceOf failed" : null) });
+      // IMD rows only for chains that have the token configured (a null balance
+      // on an IMD-less chain would just be noise).
+      if (bal.imdBalance != null) {
+        imdChains.push({ name: meta.name, initials: meta.initials, color: meta.color, symbol: getChain(key).imdSymbol || "IMD", balance: bal.imdBalance, error: err });
+        imdTotal += bal.imdBalance ?? 0;
+      }
       ethTotal += bal.ethBalance ?? 0; ethTotalUsd += bal.ethUsd ?? 0; usdTotalUsd += bal.dollarBalance ?? 0;
     });
 
@@ -105,12 +114,17 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
       }));
     const tokensUsd = tokens.reduce((s, t) => s + (t.balanceUsd ?? 0), 0);
 
+    // IMD price for the slideout header/row display (ETH/IMD pool × ETH/USD).
+    const imdPerEth = await getImdPerEth("ethereum").catch(() => 0);
+    const imdUsd = imdPerEth > 0 ? (await getEthUsdPriceFor("ethereum").catch(() => 0)) / imdPerEth : 0;
+
     return json({
       ok: true,
       walletAddress: readAddress || undefined,     // the wallet these balances describe
       walletSource: readAddress ? "session" : "signer",
       eth: { total: ethTotal, totalUsd: ethTotalUsd, chains: ethChains },
       usd: { totalUsd: usdTotalUsd, symbol: usdChains.some(c => c.symbol === "USDG") ? "USD" : "USDC", chains: usdChains },
+      imd: imdChains.length ? { total: imdTotal, totalUsd: imdTotal * imdUsd, perEth: imdPerEth, chains: imdChains } : null,
       tokens,
       totalUsd: ethTotalUsd + usdTotalUsd + tokensUsd,
     });

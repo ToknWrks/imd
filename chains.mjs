@@ -69,6 +69,10 @@ const CHAIN_DEPLOYMENTS = {
     /** The dollar asset this chain's cost-basis math prices against. */
     dollar: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
     dollarDecimals: 6,
+    /** IMD — the platform token (launchpad currency, ETH/IMD V4 pool in dip-swap). */
+    imdToken: "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    imdDecimals: 18,
+    imdSymbol: "IMD",
     chainlinkEthUsd: "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
     /** How to read ETH/USD. mainnet: Chainlink feed. */
     ethPriceSource: "chainlink",

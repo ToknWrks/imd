@@ -22,7 +22,7 @@
  *    user actions with an amount typed in the UI.
  */
 import { getChain, getEthUsdPriceFor } from "./chains.mjs";
-import { getErc20Balance } from "./dip-swap.mjs";
+import { getErc20Balance, getImdPerEth } from "./dip-swap.mjs";
 import { resolveSigner, invalidateSigner } from "./signer.mjs";
 import { getSmartAccountClient, invalidateSmartAccountClient, gasReserveWei, explainUserOpError } from "./smart-account.mjs";
 import { createPublicClient, http, getAddress, encodeFunctionData, parseAbi, formatEther, formatUnits, parseUnits } from "viem";
@@ -270,12 +270,14 @@ async function ownerBalances(chainKey, sessionOwnerAddress = null) {
     publicClientFor(chainKey).then((p) => p.getBalance({ address })),
     getErc20Balance(dep.dollar, address, chainKey).catch(() => null),
   ]);
+  const imdRaw = dep.imdToken ? await getErc20Balance(dep.imdToken, address, chainKey).catch(() => null) : null;
   return {
     address: getAddress(address),
     source: kind,
     eth: Number(ethWei) / 1e18,
     usd: dollarRaw != null ? Number(dollarRaw) / (10 ** dep.dollarDecimals) : null,
     dollarDecimals: dep.dollarDecimals,
+    imd: imdRaw != null ? Number(imdRaw) / 1e18 : null,
   };
 }
 
@@ -291,6 +293,7 @@ async function scwBalances(chainKey, { sessionKey = null } = {}) {
     pub.getCode({ address }).catch(() => "0x"),
     getErc20Balance(dep.dollar, address, chainKey).catch(() => null),
   ]);
+  const imdRaw = dep.imdToken ? await getErc20Balance(dep.imdToken, address, chainKey).catch(() => null) : null;
   return {
     address,
     eth: Number(ethWei) / 1e18,
@@ -298,6 +301,7 @@ async function scwBalances(chainKey, { sessionKey = null } = {}) {
     activated: Boolean(code && code !== "0x"),
     usd: dollarRaw != null ? Number(dollarRaw) / (10 ** dep.dollarDecimals) : null,
     dollarDecimals: dep.dollarDecimals,
+    imd: imdRaw != null ? Number(imdRaw) / 1e18 : null,
   };
 }
 
@@ -334,10 +338,15 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
     getEthUsdPriceFor(chainKey).catch(() => 0),
   ]);
   const reserve = Number(gasReserveWei(chainKey)) / 1e18;
+  // IMD spot: ETH/IMD pool rate → IMD per ETH, inverted for the IMD→ETH/USD
+  // display hints. Cached 60s in dip-swap; 0 when the pool read fails (UI hides).
+  const imdPerEth = await getImdPerEth(chainKey).catch(() => 0);
   const out = {
     ok: true,
     chain: chainKey,
     ethUsd,
+    imdPerEth,
+    imdSymbol: dep.imdSymbol || "IMD",
     hasSessionKey,
     gasReserveEth: reserve,   // kept for compatibility; max-send now computes live
     owner,
@@ -636,6 +645,18 @@ export async function moveFunds({ direction, asset = "eth", amount, chainKey = "
     });
     return { ok: true, txHash };
   }
+  if (asset === "imd") {
+    // IMD in: same owner-signed ERC-20 transfer shape, IMD token address.
+    if (!dep.imdToken) throw new Error("no IMD token configured on " + chainKey);
+    const raw = parseUnits(String(amt), dep.imdDecimals ?? 18);
+    const txHash = await owner.callContract({
+      address: getAddress(dep.imdToken),
+      abi: ERC20_ABI,
+      functionName: "transfer",
+      args: [scwAddress, raw],
+    });
+    return { ok: true, txHash };
+  }
 
   // SCW → OWNER: a UserOperation signed by the session key.
   const pub = await publicClientFor(chainKey);
@@ -670,6 +691,14 @@ export async function moveFunds({ direction, asset = "eth", amount, chainKey = "
     if (rebuiltCost >= ethWei) {
       throw new Error("gas cost exceeded balance after clamping — try a slightly smaller amount");
     }
+  } else if (asset === "imd") {
+    if (!dep.imdToken) throw new Error("no IMD token configured on " + chainKey);
+    const raw = parseUnits(String(amt), dep.imdDecimals ?? 18);
+    uo = {
+      target: getAddress(dep.imdToken),
+      data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [owner.address, raw] }),
+      value: 0n,
+    };
   } else {
     const token = getAddress(dep.dollar);
     const dec = dep.dollarDecimals;

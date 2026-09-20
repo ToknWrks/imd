@@ -8,17 +8,17 @@
 .wallet-overlay.open .wallet-slideout { opacity:1; }
 .wallet-slideout h3                  { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.12em; color:rgba(232,182,97,0.85); margin:0 0 0.75rem; display:flex; justify-content:space-between; align-items:center; }
 .wallet-accordion                    { border:1px solid rgba(255,255,255,0.09); border-radius:3px; margin-bottom:0.65rem; overflow:hidden; background:#0c0e11; }
-.wallet-accordion-header             { display:flex; align-items:center; gap:0.5rem; padding:0.7rem 0.75rem; cursor:pointer; user-select:none; background:#0c0e11; font-size:0.84rem; }
+.wallet-accordion-header             { display:flex; align-items:center; gap:0.5rem; padding:0.8rem 0.8rem; cursor:pointer; user-select:none; background:#0c0e11; font-size:0.95rem; }
 .wallet-accordion-header:hover       { background:rgba(232,182,97,0.06); }
 .wallet-accordion-header .arrow      { transition:transform 0.15s; font-size:0.7rem; color:rgba(255,255,255,0.46); }
 .wallet-accordion.open .wallet-accordion-header .arrow { transform:rotate(90deg); }
 .wallet-accordion-body               { display:none; }
 .wallet-accordion.open .wallet-accordion-body { display:block; }
-.wallet-chain-row                    { display:flex; align-items:center; gap:0.55rem; padding:0.55rem 0.75rem 0.55rem 0.75rem; font-size:0.8rem; border-top:1px solid rgba(255,255,255,0.05); font-variant-numeric:tabular-nums; }
-.wallet-chain-row .chain-icon        { width:18px; height:18px; border-radius:2px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:0.58rem; font-weight:700; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
-.wallet-chain-row .amount            { margin-left:auto; font-size:0.82rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
-.wallet-chain-row .usd               { margin-left:0.35rem; color:rgba(255,255,255,0.55); font-size:0.74rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
-.wallet-total-row                    { display:flex; align-items:center; gap:0.5rem; padding:0.7rem 0.75rem; font-size:0.88rem; border:1px solid rgba(255,255,255,0.09); border-radius:3px; background:#0c0e11; font-variant-numeric:tabular-nums; }
+.wallet-chain-row                    { display:flex; align-items:center; gap:0.55rem; padding:0.6rem 0.8rem; font-size:0.88rem; border-top:1px solid rgba(255,255,255,0.05); font-variant-numeric:tabular-nums; }
+.wallet-chain-row .chain-icon        { width:20px; height:20px; border-radius:2px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:0.62rem; font-weight:700; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-chain-row .amount            { margin-left:auto; font-size:0.92rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-chain-row .usd               { margin-left:0.35rem; color:#A8F1F7; font-size:0.8rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.wallet-total-row                    { display:flex; align-items:center; gap:0.5rem; padding:0.75rem 0.8rem; font-size:0.95rem; border:1px solid rgba(255,255,255,0.09); border-radius:3px; background:#0c0e11; font-variant-numeric:tabular-nums; }
 .wallet-total-row .amount            { margin-left:auto; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
 .wallet-token-icon                   { width:24px; height:24px; border-radius:2px; flex-shrink:0; font-size:0.7rem; display:flex; align-items:center; justify-content:center; font-weight:700; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
 .wallet-close                        { background:none; border:none; color:rgba(255,255,255,0.65); font-size:1.3rem; cursor:pointer; padding:0; line-height:1; }
@@ -48,13 +48,15 @@
 .sw-addr > span                      { overflow:hidden; text-overflow:ellipsis; }
 .sw-copy                             { background:none; border:none; color:rgba(255,255,255,0.4); cursor:pointer; font-size:0.75rem; padding:0 0.15rem; line-height:1; flex-shrink:0; }
 .sw-copy:hover                       { color:#e8b661; }
-.sw-asset                            { display:flex; align-items:center; gap:0.45rem; font-size:0.78rem; padding:0.35rem 0; font-variant-numeric:tabular-nums; }
-.sw-asset .amount                    { margin-left:auto; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
-.sw-asset .usd                       { color:rgba(255,255,255,0.5); font-size:0.7rem; min-width:4.2rem; text-align:right; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
-.sw-token-icon                       { width:18px; height:18px; border-radius:2px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:0.6rem; font-weight:700; color:#fff; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
-.sw-move-row                         { display:flex; gap:0.35rem; margin:0.1rem 0 0.4rem; }
-.sw-move-row input                   { flex:1; min-width:0; background:#0d1015; color:#fff; border:1px solid rgba(255,255,255,0.18); border-radius:3px; padding:0.3rem 0.5rem; font-size:0.78rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; outline:none; }
+.sw-asset                            { display:flex; align-items:center; gap:0.45rem; font-size:0.88rem; padding:0.4rem 0; font-variant-numeric:tabular-nums; }
+.sw-asset .amount                    { margin-left:auto; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.92rem; }
+.sw-asset .usd                       { color:#A8F1F7; font-size:0.78rem; min-width:4.2rem; text-align:right; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.sw-token-icon                       { width:20px; height:20px; border-radius:2px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:0.6rem; font-weight:700; color:#fff; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+.sw-move-row                         { display:flex; gap:0.35rem; margin:0.1rem 0 0.15rem; }
+.sw-move-row input                   { flex:1; min-width:0; background:#0d1015; color:#fff; border:1px solid rgba(255,255,255,0.18); border-radius:3px; padding:0.38rem 0.55rem; font-size:0.88rem; font-family:ui-monospace,"SF Mono",Menlo,monospace; outline:none; }
 .sw-move-row input:focus             { border-color:rgba(232,182,97,0.5); }
+/* Live ETH/USD conversion hint under a move input (sniper usd-line styling). */
+.sw-hint                             { min-height:0.95rem; font-size:0.76rem; color:#A8F1F7; font-weight:600; font-family:ui-monospace,"SF Mono",Menlo,monospace; padding:0 0.1rem 0.25rem; font-variant-numeric:tabular-nums; }
 .sw-btn                              { background:rgba(232,182,97,0.14); color:#e8b661; border:1px solid rgba(232,182,97,0.4); border-radius:3px; padding:0.3rem 0.55rem; font-size:0.72rem; cursor:pointer; white-space:nowrap; }
 .sw-btn:hover                        { background:rgba(232,182,97,0.24); }
 .sw-btn.alt                          { background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.8); border-color:rgba(255,255,255,0.18); }

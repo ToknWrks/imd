@@ -39,6 +39,26 @@ async function openWallet() {
         '</div>';
     });
     h+='</div></div>';
+    // IMD accordion — the platform token (launchpad currency). Null when the
+    // API has no IMD row (e.g. no token configured).
+    if (j.imd) {
+      h+='<div class="wallet-accordion">'+
+        '<div class="wallet-accordion-header" onclick="_toggleAccordion(this)">'+
+        '<span class="wallet-token-icon" style="background:#e8b661;color:#0b0d10">IMD</span>'+
+        '<span>IMD</span>'+
+        '<span class="arrow" style="margin-left:auto">\u25b6</span>'+
+        '<span class="amount">'+_wf(j.imd.total)+' IMD</span>'+
+        '<span class="usd">$'+_wfu(j.imd.totalUsd)+'</span>'+
+        '</div><div class="wallet-accordion-body">';
+      j.imd.chains.forEach(function(c){
+        h+='<div class="wallet-chain-row">'+
+          '<span class="chain-icon" style="background:'+c.color+';color:#fff">'+c.initials+'</span>'+
+          '<span>'+c.name+(c.error?' <span style="color:#f87171;font-size:0.7rem">\u26a0</span>':'')+'</span>'+
+          '<span class="amount">'+_wf(c.balance)+' '+_we(c.symbol)+'</span>'+
+          '</div>';
+      });
+      h+='</div></div>';
+    }
     var dl=j.usd.chains.some(function(c){return c.symbol==='USDG';})?'USD':'USDC';
     h+='<div class="wallet-accordion">'+
       '<div class="wallet-accordion-header" onclick="_toggleAccordion(this)">'+
@@ -170,7 +190,10 @@ function renderSmartWalletSection(){
   }
   var activated=scw.activated;
   var ethUsd=s.ethUsd||0;
+  var imdPerEth=s.imdPerEth||0;           // live ETH/IMD pool rate (0 → hints hidden)
+  var imdUsd=imdPerEth>0?ethUsd/imdPerEth:0;   // IMD spot in USD
   var dsym=s.dollarSymbol||'USDC';
+  var imdSym=s.imdSymbol||'IMD';
   var browserWallet=_wcAddress||null;   // set by wallet-connect.js (header session)
   var ownerTitle=browserWallet?'Connected wallet':'Owner wallet';
   function bal(v,sym){return v==null?'\u2014':_wf(v)+(sym?' '+sym:'');}
@@ -183,10 +206,17 @@ function renderSmartWalletSection(){
   h+=_swAddrRow(browserWallet||owner.address);
   // ETH row
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(owner.eth)+'</span>'+usd(owner.eth!=null?owner.eth*ethUsd:null)+'</div>';
-  h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
+  h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(\'swInEthHint\',\'eth\',this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
+  h+=_hintRow('swInEthHint','eth');
   // USD row
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca">$</span><span>'+dsym+'</span><span class="amount">'+bal(owner.usd)+'</span>'+usd(owner.usd)+'</div>';
   h+='<div class="sw-move-row"><input id="swInUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','usd')" + '">Fund \u2192</button></div>';
+  // IMD row (only when the chain has IMD configured)
+  if(s.imdPerEth!==undefined){
+    h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(owner.imd)+'</span>'+usd(owner.imd!=null&&imdUsd>0?owner.imd*imdUsd:null)+'</div>';
+    h+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(\'swInImdHint\',\'imd\',this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
+    h+=_hintRow('swInImdHint','imd');
+  }
   if(browserWallet){
     h+='<div class="hint" style="margin-top:0.4rem;font-size:0.68rem">Funding signs in your browser wallet \u2014 keys never leave it.</div>';
   }
@@ -195,9 +225,16 @@ function renderSmartWalletSection(){
   h+='<div class="sw-card"><div class="sw-card-title">Smart wallet <span class="hint">AA</span></div>';
   h+=_swAddrRow(scw.address);
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw.eth)+'</span>'+usd(scw.eth!=null?scw.eth*ethUsd:null)+'</div>';
-  h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
+  h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(\'swOutEthHint\',\'eth\',this.value)"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
+  h+=_hintRow('swOutEthHint','eth');
   h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca">$</span><span>'+dsym+'</span><span class="amount">'+bal(scw.usd)+'</span>'+usd(scw.usd)+'</div>';
   h+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn alt" onclick="' + "swMove('out','usd')" + '">\u2190 Move out</button></div>';
+  // IMD row on the SCW card too (session-key signed UO move-out)
+  if(s.imdPerEth!==undefined){
+    h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(scw.imd)+'</span>'+usd(scw.imd!=null&&imdUsd>0?scw.imd*imdUsd:null)+'</div>';
+    h+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(\'swOutImdHint\',\'imd\',this.value)"><button class="sw-btn alt" onclick="' + "swMove('out','imd')" + '">\u2190 Move out</button></div>';
+    h+=_hintRow('swOutImdHint','imd');
+  }
   h+='<div class="sw-status" id="swStatus"></div>';
   h+='<div style="margin-top:0.6rem">';
   if(!activated){h+='<button class="sw-btn activate" onclick="swActivate()">Activate smart wallet</button>';}
@@ -207,7 +244,7 @@ function renderSmartWalletSection(){
   document.getElementById('smartWalletSection').innerHTML=h;
 }
 async function swMove(direction,asset){
-  var input=document.getElementById((direction==='in'?'swIn':'swOut')+(asset==='eth'?'Eth':'Usd'));
+  var input=document.getElementById((direction==='in'?'swIn':'swOut')+(asset==='eth'?'Eth':(asset==='imd'?'Imd':'Usd')));
   if(!input||!_swState){return;}
   var amount=parseFloat(input.value);
   if(!(amount>0)){_swStatus('enter an amount');return;}
@@ -257,6 +294,22 @@ async function swMove(direction,asset){
 }
 function chainIdHexFor(chain){
   return chain==='base'?'0x2105':(chain==='robinhood'?'0x1237':'0x1');
+}
+// Live conversion hint under a move input — mirrors the sniper page's usd-line.
+// ETH input → "≈ $x USD"; IMD input → "≈ x ETH · $y USD". Empty/zero → blank.
+function swHint(id,asset,value){
+  var el=document.getElementById(id); if(!el)return;
+  var v=parseFloat(value)||0;
+  var s=_swState||{};
+  var ethUsd=s.ethUsd||0, imdPerEth=s.imdPerEth||0;
+  if(!(v>0)){el.textContent='';return;}
+  if(asset==='eth'){
+    el.textContent=ethUsd>0?('\u2248 $'+_wfu(v*ethUsd)+' USD'):'';
+  }else if(asset==='imd'){
+    if(!(imdPerEth>0)){el.textContent='ETH/IMD rate unavailable';return;}
+    var eth=v/imdPerEth;
+    el.textContent='\u2248 '+eth.toLocaleString(void 0,{maximumFractionDigits:6})+' ETH'+(ethUsd>0?(' \u00b7 $'+_wfu(eth*ethUsd)+' USD'):'');
+  }
 }
 // Fill the outbound ETH input with the live max-sendable (balance − exact gas cost
 // of the sweep UO). Uses maxSendableEth from the status API when present.
