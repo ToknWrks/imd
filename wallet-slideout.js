@@ -3,6 +3,28 @@
  * Returns a string of HTML (overlay div + script tag) to embed in every page.
  */
 
+/**
+ * Pure helper: build eth_sendTransaction params for a browser-signed Fund /
+ * Move-in tx. Exported for tests. `from` MUST be the extension's ACTIVE
+ * account (eth_requestAccounts), never a page-load-cached address — the
+ * "from should be same as current address" bug (2026-09-19) came from signing
+ * with a stale identity after the user switched accounts in the extension.
+ */
+export function fundingTxParams({ from, scwAddress, asset, amount, chain, tokenAddress, tokenDecimals }) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(from || "")) throw new Error("invalid from address");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(scwAddress || "")) throw new Error("invalid smart-wallet address");
+  const chainIdHex = chain === "base" ? "0x2105" : (chain === "robinhood" ? "0x1237" : "0x1");
+  if (asset === "eth") {
+    return { from, to: scwAddress, value: "0x" + BigInt(Math.round(amount * 1e18)).toString(16), chainId: chainIdHex };
+  }
+  // ERC-20 transfer(address,uint256) — selector a9059cbb
+  const dec = tokenDecimals != null ? tokenDecimals : 6;
+  const raw = BigInt(Math.round(amount * (10 ** dec))).toString(16).padStart(64, "0");
+  const toPadded = scwAddress.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddress || "")) throw new Error("no token configured for this asset");
+  return { from, to: tokenAddress, data: "0xa9059cbb" + toPadded + raw, chainId: chainIdHex };
+}
+
 export const WALLET_NAV_BUTTON = `<button class="wallet-nav-btn" onclick="openWallet()" title="Wallet"
   style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fafafa;cursor:pointer;padding:0;">
   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M21 7.28V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2.28A2 2 0 0 0 22 15V9a2 2 0 0 0-1-1.72zM20 9v6h-7V9h7zM5 19V5h14v2h-5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h5v2H5z"/></svg>
