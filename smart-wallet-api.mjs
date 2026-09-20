@@ -387,7 +387,7 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
  *  Hosted has NO server-side key by design, so when `browserFrom` is supplied
  *  (and no env signer exists) this returns the UNSIGNED factory call for the
  *  user's browser wallet to sign — the user's EOA pays the deploy gas. */
-export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null } = {}) {
+export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null, userId = null } = {}) {
   const dep = getChain(chainKey);
   const pub = await publicClientFor(chainKey);
   const scw = await getSmartAccountClient(chainKey);
@@ -397,13 +397,17 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
   if (code && code !== "0x") return { ok: true, alreadyDeployed: true, address };
 
   const factoryAbi = parseAbi(["function createSemiModularAccount(address owner, uint256 salt) returns (address)"]);
-  // The owner of the account is the session key EOA in Phase 1 (see the
-  // honesty note in smart-account.mjs) — pass ITS address as owner.
-  // GUARD: if the SDK exposes no owner, do NOT fall back to the SCW address —
-  // deploying an account owned by itself bricks it. Refuse loudly instead.
-  const sessionKeyAddress = scw.account.owner?.address ? getAddress(scw.account.owner.address) : null;
+  // The account owner is the session key EOA. The AA SDK does NOT reliably
+  // expose it (scw.account.owner was undefined in production — the guard below
+  // fired on the first hosted activation attempt, 2026-09-19), so derive it
+  // the authoritative way: from the USER'S OWN registry session key. Never
+  // fall back to the SCW address — deploying an account owned by itself
+  // bricks it.
+  let sessionKeyAddress = scw.account.owner?.address ? getAddress(scw.account.owner.address) : null;
   if (!sessionKeyAddress) {
-    throw new Error("smart-account SDK exposed no account owner — refusing to build a deploy that could mint an ownerless/self-owned account");
+    const sk = await resolveUserSessionKeyAsync(userId);
+    if (!sk) throw new Error("cannot determine the smart wallet's owner — no registry session key for this user (was the wallet generated in-app?)");
+    sessionKeyAddress = getAddress(privateKeyToAccount(sk).address);
   }
   const FACTORY = "0x00000000000017c61b5bEe81050EC8eFc9c6fecd";
   const callData = encodeFunctionData({

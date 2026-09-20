@@ -2337,7 +2337,11 @@ const server = createServer(async (req, res) => {
         // Hosted has no AGENT_PRIVATE_KEY by design — when the client sends its
         // browser-wallet address, return the unsigned factory call for it to
         // sign (user's EOA pays deploy gas) instead of the env-signer path.
-        return json(await activateSmartWallet(chain || "ethereum", { browserFrom: from || null }));
+        // The session user id drives the owner derivation (registry key).
+        return json(await activateSmartWallet(chain || "ethereum", {
+          browserFrom: from || null,
+          userId: sessionAddress(req),
+        }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
     // Generate the burner session key server-side; returns the key ONCE (the

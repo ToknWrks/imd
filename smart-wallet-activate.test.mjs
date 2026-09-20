@@ -16,17 +16,18 @@ const STUBS = {
     export const gasReserveWei = () => 0n;
     export function invalidateSmartAccountClient() {}
     export function explainUserOpError(e) { return String(e); }
-    // The SCW client the status/activate paths use. owner = a deterministic EOA.
+    // PRODUCTION SHAPE: the Alchemy client does NOT expose account.owner
+    // (verified live 2026-09-19 — the guard fired on the first activation).
+    // The owner must come from the registry session key instead.
     export async function getSmartAccountClient(chainKey = "ethereum", opts = {}) {
       return {
         account: {
           address: "0x" + "9".repeat(40),
-          owner: { address: "0x" + "e".repeat(40) },
+          owner: undefined,
         },
         buildUserOperation: async () => ({ preVerificationGas: 0n, verificationGasLimit: 0n, maxFeePerGas: 0n, callGasLimit: 0n }),
         sendUserOperation: async () => ({ hash: "0x" + "f".repeat(64) }),
         waitForUserOperationTransaction: async () => "0x" + "f".repeat(64),
-        buildUserOperationWithPaymasterAndData: undefined,
       };
     }
   `,
@@ -47,7 +48,16 @@ const STUBS = {
     export function setUserSecret() {}
   `,
   "smart-wallet-registry.stub.mjs": `
-    export function getWalletRecord() { return null; }
+    import { privateKeyToAccount } from "viem/accounts";
+    // A deterministic session key; the test expects its EOA as owner.
+    const SK = "0x" + "1".repeat(64);
+    export function getWalletRecord() {
+      return {
+        scwAddress: "0x" + "9".repeat(40),
+        sessionKeyAddress: privateKeyToAccount(SK).address,
+        sessionKeyEnc: "enc:" + SK,
+      };
+    }
     export function setWalletRecord() {}
   `,
 };
@@ -63,9 +73,12 @@ register(pathToFileURL("./scripts/test-loader-hook.mjs"));
 const CHILD_SNIPPET = `
   const mod = await import("../smart-wallet-api.mjs");
   const from = "0x" + "a".repeat(40);
+  const userId = "0x" + "2".repeat(40);
   let r;
   try {
-    r = await mod.activateSmartWallet("ethereum", { browserFrom: from });
+    // owner= undefined on the SDK client (production reality) — the registry
+    // key path must supply the owner. Stub returns a key whose EOA is 0xeee…1.
+    r = await mod.activateSmartWallet("ethereum", { browserFrom: from, userId });
   } catch (e) {
     // The one failure mode this test exists to catch: a scope/reference bug.
     if (e instanceof ReferenceError || /is not defined/.test(String(e))) { console.error("REFERENCE_ERROR:" + e.message); process.exit(2); }
@@ -73,6 +86,11 @@ const CHILD_SNIPPET = `
   }
   if (!r.ok || r.browserSign !== true) { console.error("BAD_PAYLOAD:" + JSON.stringify(r).slice(0, 200)); process.exit(4); }
   if (!/^0x[0-9a-fA-F]{40}$/.test(r.factory) || !/^0x[0-9a-fA-F]{40}$/.test(r.owner)) { console.error("BAD_ADDR:" + JSON.stringify(r).slice(0, 200)); process.exit(5); }
+  // Owner MUST be the session-key EOA derived from the registry key — never
+  // the SCW address itself (self-owned = bricked). The stub key's EOA is
+  // 0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A (deterministic key 0x111…1).
+  if (r.owner !== "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A") { console.error("WRONG_OWNER:" + r.owner); process.exit(7); }
+  if (r.owner === r.scwAddress) { console.error("SELF_OWNED"); process.exit(8); }
   if (!/^0x[a-f0-9]+$/i.test(r.callData) || r.callData.length < 10) { console.error("BAD_CALLDATA"); process.exit(6); }
   console.log("ACTIVATE_BROWSER_PATH_OK");
 `;
