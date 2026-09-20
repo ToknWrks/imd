@@ -32,6 +32,27 @@ export const WALLET_NAV_BUTTON = `<button class="wallet-nav-btn" onclick="openWa
 
 // JS helpers embedded in the slideout script
 const SLIDEOUT_JS = /* js */`
+// fundingTxParams — browser-side copy. The module-level export above is NOT in
+// scope inside this embedded <script> block; keep the two implementations in
+// sync (wallet-funding.test.mjs exercises the module export; the parse test
+// covers this copy).
+function fundingTxParams(params) {
+  var from = params.from, scwAddress = params.scwAddress, asset = params.asset,
+      amount = params.amount, chain = params.chain,
+      tokenAddress = params.tokenAddress, tokenDecimals = params.tokenDecimals;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(from || "")) throw new Error("invalid from address");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(scwAddress || "")) throw new Error("invalid smart-wallet address");
+  var chainIdHex = chain === "base" ? "0x2105" : (chain === "robinhood" ? "0x1237" : "0x1");
+  if (asset === "eth") {
+    return { from: from, to: scwAddress, value: "0x" + BigInt(Math.round(amount * 1e18)).toString(16), chainId: chainIdHex };
+  }
+  var dec = tokenDecimals != null ? tokenDecimals : 6;
+  var raw = BigInt(Math.round(amount * (10 ** dec))).toString(16).padStart(64, "0");
+  var toPadded = scwAddress.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddress || "")) throw new Error("no token configured for this asset");
+  return { from: from, to: tokenAddress, data: "0xa9059cbb" + toPadded + raw, chainId: chainIdHex };
+}
+
 function _wf(n) { return n == null ? '\u2014' : Number(n).toLocaleString(void 0, {maximumFractionDigits:4}); }
 function _wfu(n) { return n == null ? '\u2014' : Number(n).toLocaleString(void 0, {maximumFractionDigits:2}); }
 function _we(s) { var d={'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}; return String(s||'').replace(/[<>&"]/g,function(c){return d[c];}); }
