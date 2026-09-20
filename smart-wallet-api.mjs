@@ -353,7 +353,8 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
     const ownerEoa = getAddress(rec.ownerEoa);
     const pub = await publicClientFor(chainKey);
     const dep = getChain(chainKey);
-    const [ethWei, ownerEthWei, code, dollarRaw, ownerUsdRaw] = await Promise.all([
+    // Destructuring must match the promise order: [scw-eth, scw-code, scd-usd, owner-eth, owner-usd]
+    const [scwEthWei, code, dollarRaw, ownerEthWei, ownerUsdRaw] = await Promise.all([
       pub.getBalance({ address: scwAddress }).catch(() => 0n),
       pub.getCode({ address: scwAddress }).catch(() => "0x"),
       getErc20Balance(dep.dollar, scwAddress, chainKey).catch(() => null),
@@ -377,7 +378,7 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
       },
       scw: {
         address: scwAddress,
-        eth: Number(ethWei) / 1e18,
+        eth: Number(scwEthWei) / 1e18,
         activated: Boolean(code && code !== "0x"),
         usd: dollarRaw != null ? Number(dollarRaw) / 10 ** (dep.dollarDecimals ?? 6) : null,
       },
