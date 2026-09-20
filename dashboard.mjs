@@ -73,7 +73,7 @@ import { getMarketOverview } from "./zooch-data.mjs";
 import { listMmStrategies, computeMmPosition } from "./mm-db.mjs";
 import { analyzeTechnicals, simulateSellImpact } from "./zooch-analysis.mjs";
 import { computeWalletPosition } from "./wallet-position.mjs";
-import { resolveSigner } from "./signer.mjs";
+import { resolveSigner, resolveSignerUser } from "./signer.mjs";
 import { executeSniperSell } from "./sniper-extras.mjs";
 import { getIcon, tokenIconUrl, chainIconUrl } from "./icons.mjs";
 import { createVaultStart, verifyVaultFinish, importVaultFile, vaultStatus } from "./vault.mjs";
@@ -2120,7 +2120,12 @@ const server = createServer(async (req, res) => {
         amt = Number(amount);
         if (!(amt > 0)) return json({ ok: false, error: "amount must be a positive number" });
         const slippage = Number(slippagePct ?? watcher.slippage_pct ?? 3);
-        const signer = await resolveSigner(watcher.chain || "ethereum");
+        // Per-user signer (2026-09-20): the global resolveSigner() resolved a
+        // legacy env wallet and — for an AA env key — derived an ORPHAN
+        // LightAccount (AA13, "sender balance and deposit together is 0").
+        // resolveSignerUser pins autonomy users to THEIR registry SCW and
+        // routes co-pilot users through the approval modal.
+        const signer = await resolveSignerUser(sessionAddress(req), watcher.chain || "ethereum");
         const result = await executeSniperSell({
           signer,
           chainKey: watcher.chain || "ethereum",
@@ -2221,7 +2226,9 @@ const server = createServer(async (req, res) => {
           ignoreSchedule: true,   // manual "Buy now" overrides the cadence; budget/allocation guards still apply
         });
         const chainKey = watcher.chain || "ethereum";
-        const signer = await resolveSigner(chainKey);
+        // Per-user signer — same fix as the exit route (2026-09-20): never the
+        // global resolveSigner() on hosted (orphan derivation, AA13).
+        const signer = await resolveSignerUser(sessionAddress(req), chainKey);
         const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, amountUsd, { slippagePct: strategy.slippage_pct ?? watcher.slippage_pct ?? 3, chainKey });
         const tokenAmount = Number(formatUnits(BigInt(quotedOut), watcher.decimals ?? 18));
         finalizeStrategyExecution({ executionId: reservation.executionId, txHash });
