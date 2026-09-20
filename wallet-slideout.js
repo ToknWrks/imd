@@ -330,23 +330,34 @@ async function swMove(direction,asset){
 function chainIdHexFor(chain){
   return chain==='base'?'0x2105':(chain==='robinhood'?'0x1237':'0x1');
 }
-// Send ETH from the browser wallet to the ACTIVATION gas key (the session-key
-// EOA). Separate from Fund \u2192 (which targets the SCW) \u2014 the two addresses are
-// different and conflating them cost the user a confused funding round.
+// Fund the activation gas key from the browser wallet, then automatically
+// retry the (server-side) deploy — one user action, no address copying.
 async function swFundGas(){
-  if(!window.ethereum||!_swState||!_swState.gasPayer){_swStatus('gas key unknown \u2014 click Activate first',false,true);return;}
-  var inp=document.getElementById('swGasFund');
-  var amount=parseFloat(inp&&inp.value)||0;
-  if(!(amount>0)){_swStatus('enter an amount',false,true);return;}
+  if(!window.ethereum||!_swState||!_swState.gasPayer){_swStatus('gas key unknown — click Activate first',false,true);return;}
   var gasPayer=_swState.gasPayer;
-  _swStatus('signing in your wallet\u2026',true);
+  var amount=0.002;
+  _swStatus('signing the gas funding send in your wallet…',true);
   try{
     var accts=await window.ethereum.request({method:'eth_requestAccounts'});
     var from=accts&&accts[0];
     if(!from){_swStatus('no account active in your wallet',false,true);return;}
     var wei='0x'+BigInt(Math.round(amount*1e18)).toString(16);
     var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:from,to:gasPayer,value:wei,chainId:chainIdHexFor(_swState.chain)}]});
-    _swStatus('\u2713 sent to the gas key \u2014 tx '+(txHash||'').slice(0,10)+'\u2026 click Activate once it lands (\u22481 block).');
+    _swStatus('gas funding sent — waiting for it to land, then deploying…',true);
+    // Poll the gas key's balance until it shows the funds (max ~2 min), then
+    // call Activate again — the server does the deploy itself.
+    var deadline=Date.now()+120000;
+    var funded=false;
+    while(Date.now()<deadline){
+      await new Promise(function(res){setTimeout(res,5000);});
+      try{
+        var chk=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,from:_wcAddress||null,checkOnly:true})});
+        var cj=await chk.json();
+        if(!cj.needsGas){funded=true;break;}
+      }catch{}
+    }
+    if(funded){ await swActivate(); }
+    else { _swStatus('gas funding not confirmed yet — click Activate in a moment',false,true); }
   }catch(e){
     if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);return;}
     _swStatus(String(e.message||e).slice(0,160),false,true);
@@ -402,14 +413,12 @@ async function swActivate(){
     var j=await r.json();
     if(j.needsGas){
       // The deploy is signed by the wallet's own gas key (msg.sender must be
-      // the account owner or the factory silently no-ops). Tell the user
-      // exactly what to fund — the SCW balance is irrelevant for this.
+      // the account owner or the factory silently no-ops). ONE button chains
+      // both steps: browser-signs the funding send, then auto-retries the
+      // (server-side) deploy — no manual address copying, no extra inputs.
       _swState.gasPayer=j.gasPayer;   // remember it for swFundGas()
-      _swStatus(j.message,false,true);
-      if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
-      // Show the gas-key address prominently + a copy button. Insert before
-      // the .sw-grid (a DIRECT child of #smartWalletSection — insertBefore
-      // throws if the reference node is a deeper descendant).
+      if(btn){btn.disabled=false;btn.textContent='Fund & activate';}
+      _swStatus('Activation needs deploy gas in the wallet\u2019s gas key (msg.sender = owner, else the factory no-ops). Click \u201cFund & activate\u201d and sign the \u2248'+_wfu(j.suggestedGasEth||0.002)+' ETH send — the deploy follows automatically.');
       var host=document.getElementById('smartWalletSection');
       if(host && j.gasPayer){
         var old=document.getElementById('gasKeyNote');
@@ -417,12 +426,9 @@ async function swActivate(){
         var note=document.createElement('div');
         note.id='gasKeyNote';
         note.className='sw-card';note.style.marginTop='0.6rem';
-        note.innerHTML='<b style="color:#e8b661">Fund the gas key to activate</b>'+
-          '<div class="sw-addr" style="margin-top:0.35rem"><span title="'+_we(j.gasPayer)+'">'+_swAddr(j.gasPayer)+'</span>'+
-          '<button type="button" class="sw-copy" data-addr="'+_we(j.gasPayer)+'" onclick="swCopyAddr(this)" title="Copy gas-key address">\u29c9</button></div>'+
-          '<div class="sw-move-row" style="margin-top:0.45rem"><input id="swGasFund" type="number" step="0.0001" min="0" placeholder="0.002" value="0.002"><button class="sw-btn" onclick="swFundGas()">Send to gas key \u2192</button></div>'+
-          '<div id="swGasFundHint" class="sw-hint"></div>'+
-          '<div class="hint" style="margin-top:0.25rem">Current gas-key balance: '+_wfu(j.gasPayerBalanceEth)+' ETH. Activation is signed by this key because the factory requires msg.sender = owner. (The Fund \u2192 buttons above send to the smart wallet, NOT to this gas key.)</div>';
+        note.innerHTML='<b style="color:#e8b661">Fund &amp; activate</b>'+
+          '<div class="sw-move-row" style="margin-top:0.45rem"><button class="sw-btn" onclick="swFundGas()">Sign \u2248'+_wfu(j.suggestedGasEth||0.002)+' ETH \u2192 gas key, then auto-deploy</button></div>'+
+          '<div class="hint" style="margin-top:0.25rem">Gas-key '+_swAddr(j.gasPayer)+' (balance '+_wfu(j.gasPayerBalanceEth)+' ETH) signs the deploy because the factory requires msg.sender = owner. Leftover gas stays as the wallet\u2019s operating float.</div>';
         var grid=host.querySelector('.sw-grid');
         if(grid){host.insertBefore(note,grid);}else{host.appendChild(note);}
       }

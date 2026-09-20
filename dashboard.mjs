@@ -2341,6 +2341,7 @@ const server = createServer(async (req, res) => {
         return json(await activateSmartWallet(chain || "ethereum", {
           browserFrom: from || null,
           userId: sessionAddress(req),
+          checkOnly: body.checkOnly === true,
         }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }

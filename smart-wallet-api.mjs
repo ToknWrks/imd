@@ -393,7 +393,7 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
  *  MASTER_KEY) — msg.sender = owner, gas paid from the session-key EOA, and
  *  the UI tells the user to fund THAT address. `browserFrom` is accepted for
  *  API compat but signing never happens in the browser for activation. */
-export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null, userId = null } = {}) {
+export async function activateSmartWallet(chainKey = "ethereum", { browserFrom = null, userId = null, checkOnly = false } = {}) {
   const dep = getChain(chainKey);
   const pub = await publicClientFor(chainKey);
   const scw = await getSmartAccountClient(chainKey);
@@ -402,6 +402,8 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
   const code = await pub.getCode({ address }).catch(() => "0x");
   if (code && code !== "0x") return { ok: true, alreadyDeployed: true, address };
 
+  // checkOnly: the funding poller re-runs this until the gas key is funded —
+  // it must NEVER trigger the actual deploy. (Real flag is in opts, above.)
   const factoryAbi = parseAbi(["function createSemiModularAccount(address owner, uint256 salt) returns (address)"]);
   // The owner is the session-key EOA, derived from the USER'S registry key.
   // The AA SDK does not reliably expose it (scw.account.owner was undefined in
@@ -427,8 +429,13 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
       needsGas: true,
       gasPayer: sessionKeyAddress,
       gasPayerBalanceEth: Number(payerBal) / 1e18,
-      message: `Activation is signed by the wallet's own gas key (the factory ignores anyone else — msg.sender must be the account owner). Fund the gas key ${sessionKeyAddress} with ~0.002 ETH, then click Activate again.`,
+      suggestedGasEth: 0.002,
+      ...(checkOnly ? {} : { message: `Activation is signed by the wallet's own gas key (the factory ignores anyone else — msg.sender must be the account owner). Fund the gas key ${sessionKeyAddress} with ~0.002 ETH, then click Activate again.` }),
     };
+  }
+  if (checkOnly) {
+    // Funded — tell the poller to proceed; it will call again without checkOnly.
+    return { ok: true, checkOnly: true, readyToDeploy: true, gasPayer: sessionKeyAddress };
   }
 
   // Server signs WITH THE SESSION KEY so msg.sender == owner.
