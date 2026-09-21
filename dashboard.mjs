@@ -62,6 +62,7 @@ import { getTokenMeta, resolvePoolOverride, buyToken } from "./dip-swap.mjs";
 import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wallet-slideout.js";
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
 import { COPILOT_BADGE, COPILOT_JS } from "./copilot-ui.js";
+import { DIRECT_SIGN_JS } from "./direct-sign.mjs";
 import { APPKIT_SCRIPT } from "./wallet-appkit.js";
 import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
 import { handleAuth, sessionAddress } from "./auth.mjs";
@@ -187,6 +188,7 @@ function shell(title, body, active = "") {
   <div id="cpModalBackdrop" style="display:none"><div id="cpModal"></div></div>
   <script>${WALLET_CONNECT_JS}<\/script>
   <script>${COPILOT_JS}<\/script>
+  <script>${DIRECT_SIGN_JS}<\/script>
   ${appKitScript}
 </body>
 </html>`;
@@ -608,6 +610,16 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         try {
           const r = await fetch('/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount, slippagePct: slippage }) });
           const j = await r.json();
+          // Direct-sign flow (2026-09-21): co-pilot manual sells come back as a
+          // built tx — hand it to the wallet immediately, record the hash after.
+          if (j.ok && j.directSign) {
+            status.textContent = 'signing in your wallet…';
+            const txHash = await window.directSignTx(j.directSign);
+            await fetch('/api/direct-trade/record', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'exit', ref: exitCtx.id ?? exitCtx.watcherId, txHash, amount: -parseFloat(amount), symbol: exitCtx.symbol ?? null }) });
+            status.textContent = 'sent — tx ' + (txHash || '').slice(0, 14) + '… (check Etherscan for the receipt)';
+            setTimeout(() => location.reload(), 1500);
+            return false;
+          }
           if (j.ok) {
             status.textContent = 'sold — tx ' + (j.txHash || '').slice(0, 14) + '…';
             setTimeout(() => location.reload(), 1500);
@@ -616,7 +628,7 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
             btn.disabled = false;
           }
         } catch (err) {
-          status.textContent = err.message;
+          status.textContent = err.code === 4001 ? 'rejected in wallet' : err.message;
           btn.disabled = false;
         }
         return false;
@@ -2109,7 +2121,53 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POST") {
+/**
+ * Build (not execute) a sell tx for the direct-sign flow (2026-09-21):
+ * returns { directSign: { to, data, value, chainId } } for the browser wallet.
+ * Curve coins route through sellCurveCoin's payload shape; AMM sells through
+ * the venue-specific builders. No signer object needed — the USER signs.
+ */
+async function buildSellTx(watcher, amountHuman, slippagePct) {
+  const chainKey = watcher.chain || "ethereum";
+  const token = watcher.contract_address;
+  const dep = getChain(chainKey);
+  const chainId = chainKey === "base" ? 8453 : (chainKey === "robinhood" ? 4663 : 1);
+  const meta = await getTokenMeta(chainKey, token);
+  const amountIn = BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
+
+  // Curve coin: sellCurveCoin assembles the UR payload (commands 0x060c0f).
+  const { getCurveCoinState, getImdPerEth } = await import("./dip-swap.mjs");
+  const curveState = await getCurveCoinState(token, chainKey).catch(() => null);
+  if (curveState) {
+    const imdPerEth = await getImdPerEth(chainKey).catch(() => null);
+    if (!imdPerEth) throw new Error("curve sell: can't price IMD (ETH/IMD pool unavailable)");
+    const { buildDirectCurveSell } = await import("./direct-sell.mjs");
+    const built = await buildDirectCurveSell({ tokenAddress: token, coinAmountWei: amountIn, sellerAddress: uid, slippagePct, chainKey, curveState, imdPerEth, universalRouter: dep.v4.universalRouter });
+    return { directSign: { to: built.to, data: built.data, value: "0", chainId, gas: built.gas } };
+  }
+
+  // AMM venues: resolve the venue, then build via the exported V4/V3 builders.
+  const chosen = watcher.pool_address
+    ? await (async () => { const { resolvePoolOverride } = await import("./sniper-extras.mjs"); return resolvePoolOverride(token, watcher.pool_address, chainKey); })()
+    : null;
+  if (chosen?.kind === "v4" || (!chosen && watcher.pool_address == null)) {
+    // V4 pool (saved or auto-resolved)
+    const pool = chosen ? {
+      dex: "V4", fee: chosen.fee, tickSpacing: chosen.tickSpacing, hooks: chosen.hooks,
+      currency0: chosen.currency0, currency1: chosen.currency1,
+    } : await (async () => {
+      const { findBestV4Pool } = await import("./dip-swap.mjs");
+      return await findBestV4Pool(token, chainKey);
+    })();
+    const { buildV4SellCall } = await import("./sniper-extras.mjs");
+    const { call } = await buildV4SellCall({ chainKey, tokenAddress: token, amountIn, slippagePct, pool, recipient: watcher.user_id });
+    const { encodeFunctionData } = await import("viem");
+    return { directSign: { to: call.address, data: encodeFunctionData({ abi: call.abi, functionName: call.functionName, args: call.args }), value: (call.value ?? 0n).toString(), chainId } };
+  }
+  throw new Error("no direct-sign venue for this token — use the Sniper page sell");
+}
+
+if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POST") {
       const id = decodeURIComponent(url.split("/")[3]);
       const watcher = getDipWatcher(id);
       if (!watcher) return json({ ok: false, error: "token not found" });
@@ -2120,12 +2178,29 @@ const server = createServer(async (req, res) => {
         amt = Number(amount);
         if (!(amt > 0)) return json({ ok: false, error: "amount must be a positive number" });
         const slippage = Number(slippagePct ?? watcher.slippage_pct ?? 3);
-        // Per-user signer (2026-09-20): the global resolveSigner() resolved a
-        // legacy env wallet and — for an AA env key — derived an ORPHAN
-        // LightAccount (AA13, "sender balance and deposit together is 0").
-        // resolveSignerUser pins autonomy users to THEIR registry SCW and
-        // routes co-pilot users through the approval modal.
-        const signer = await resolveSignerUser(sessionAddress(req), watcher.chain || "ethereum");
+        // Direct-sign (2026-09-21 UX): the user's click IS the approval — in
+        // co-pilot mode we return the BUILT tx for the browser to sign in one
+        // step (Rabby pops), then /api/direct-trade/record lands it in the
+        // ledger. The modal flow remains only for unattended engine trades.
+        const uid = sessionAddress(req);
+        const { getUser } = await import("./users.mjs");
+        const u = getUser(uid);
+        const mode = u?.signer_mode || "copilot";
+        if (mode === "copilot") {
+          const built = await buildSellTx(watcher, amt, slippage);
+          return json({
+            ok: true,
+            directSign: built.directSign,
+            recordKind: "exit",
+            recordRef: id,
+            chain: watcher.chain || "ethereum",
+            asset: "token",
+            amount: -amt,
+            symbol: watcher.symbol ?? null,
+          });
+        }
+        // Autonomy (session key) — server executes as before.
+        const signer = await resolveSignerUser(uid, watcher.chain || "ethereum");
         const result = await executeSniperSell({
           signer,
           chainKey: watcher.chain || "ethereum",
@@ -2442,6 +2517,27 @@ const server = createServer(async (req, res) => {
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
 
+
+    // Direct-sign ledger: the browser signed a manual trade (direct-sign flow,
+    // 2026-09-21) — record it so Trades shows it with its owner. No copilot row.
+    if (url === "/api/direct-trade/record" && method === "POST") {
+      try {
+        const uid = sessionAddress(req);
+        if (!uid) return json({ ok: false, error: "not signed in" });
+        const { kind, ref, txHash, amount, symbol } = JSON.parse(await readBody() || "{}");
+        if (!txHash) return json({ ok: false, error: "txHash required" });
+        if (kind === "exit") {
+          insertDipTrade({
+            watcher_id: ref, sell_tx_hash: txHash, sell_usd: null,
+            buy_tx_hash: null, eth_spent: null, token_amount: Number(amount) || null,
+            price_usd: null, status: "ok", execution_kind: "exit",
+          });
+        } else {
+          insertSniperTrade({ chain: "ethereum", contract_address: String(ref || "").toLowerCase(), symbol: symbol ?? null, dex: "DIRECT SIGN", eth_spent: 0, token_amount: kind === "buy" ? null : null, buy_tx_hash: txHash, user_id: uid });
+        }
+        return json({ ok: true });
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
 
     if (url === "/api/pm2-status" && method === "GET") {
       try {
