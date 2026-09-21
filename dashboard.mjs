@@ -620,6 +620,11 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
             setTimeout(() => location.reload(), 1500);
             return false;
           }
+          if (j.curveNative) {
+            status.innerHTML = _we(j.error) + ' <a href="' + _we(j.launchpad) + '" target="_blank" rel="noopener" style="color:#e8b661">Open the launchpad \u2192</a>';
+            btn.disabled = false;
+            return false;
+          }
           if (j.ok) {
             status.textContent = 'sold — tx ' + (j.txHash || '').slice(0, 14) + '…';
             setTimeout(() => location.reload(), 1500);
@@ -2141,6 +2146,21 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
   if (curveState) {
     const imdPerEth = await getImdPerEth(chainKey).catch(() => null);
     if (!imdPerEth) throw new Error("curve sell: can't price IMD (ETH/IMD pool unavailable)");
+    // LAUNCHPAD-COIN GUARD (2026-09-21): curve coins keep balances in the
+    // hook's ledger — raw ERC-20 storage can be ZERO while balanceOf shows
+    // the position. Pulling via Permit2 then panics (TRANSFER_FROM_FAILED)
+    // and burns gas. Only coins in the raw wallet map are sellable here.
+    const { probeRawErc20Balance, LAUNCHPAD_TOKEN_URL } = await import("./launchpad-token.mjs");
+    const raw = await probeRawErc20Balance(token, uid, chainKey);
+    if (raw < amountIn) {
+      const launchpad = LAUNCHPAD_TOKEN_URL(token);
+      return {
+        ok: false,
+        error: `This coin's balance lives in the launchpad's curve ledger, not the wallet's ERC-20 balance — it can't be sold through Uniswap routes (the transfer would fail). Sell it on the launchpad: ${launchpad}`,
+        launchpad,
+        curveNative: true,
+      };
+    }
     const { buildDirectCurveSell } = await import("./direct-sell.mjs");
     const built = await buildDirectCurveSell({ tokenAddress: token, coinAmountWei: amountIn, sellerAddress: uid, slippagePct, chainKey, curveState, imdPerEth, universalRouter: dep.v4.universalRouter });
     return { directSign: { to: built.to, data: built.data, value: "0", chainId, gas: built.gas } };
