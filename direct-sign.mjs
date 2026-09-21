@@ -27,6 +27,19 @@ window.directSignTx = async function(ds) {
   if (ds.gas) tx.gas = ds.gas;
   return await window.ethereum.request({ method: 'eth_sendTransaction', params: [tx] });
 };
+// Poll for a receipt via the wallet's own provider — used to wait for an
+// approve() leg to mine before re-requesting the next staged step (Permit2
+// chains build one call at a time; the next call needs the prior one final).
+window.waitForWalletReceipt = async function(txHash, timeoutMs) {
+  timeoutMs = timeoutMs || 90000;
+  var start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    var r = await window.ethereum.request({ method: 'eth_getTransactionReceipt', params: [txHash] });
+    if (r) return r;
+    await new Promise(function(res) { setTimeout(res, 1500); });
+  }
+  throw new Error('approval tx did not confirm in time — check your wallet, then try again');
+};
 // Toast: bottom-center notification (shared with copilot's cpToast when present)
 window.dsToast = function(msg, err) {
   if (window.cpToast) { cpToast(msg); return; }
@@ -36,28 +49,30 @@ window.dsToast = function(msg, err) {
   document.body.appendChild(t);
   setTimeout(function(){ t.remove(); }, 5000);
 };
-// Shared wrapper for manual trades: POST to the route; if the response carries
-// directSign, hand it to the wallet and post the hash back for the ledger.
-window.directTrade = async function(route, body, opts) {
-  opts = opts || {};
-  var statusEl = opts.statusEl ? document.getElementById(opts.statusEl) : null;
-  var set = function(m) { if (statusEl) statusEl.textContent = m; };
-  set('preparing the trade…');
-  try {
-    var r = await fetch(route, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+// Generic direct-sign trade runner: POSTs to the route; when the response
+// carries an approval leg (Permit2/ERC-20 allowance chain), signs it, waits
+// for it to mine, then re-POSTs the SAME body to get the next staged step —
+// approve -> approve -> trade, one wallet signature per step (mirrors what
+// the server's autonomy signer does automatically). Only the final trade tx
+// gets posted to the ledger. Returns the route's json on any non-directSign
+// response (errors, or an already-executed autonomy result) unchanged.
+window.directSignTrade = async function(route, body, setStatus) {
+  for (var step = 0; step < 5; step++) {
+    var r = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     var j = await r.json();
-    if (!j.ok) throw new Error(j.error || 'trade failed');
-    if (!j.directSign) return j; // server executed it (autonomy) — done
-    set('signing in your wallet…');
+    if (!j.ok || !j.directSign) return j;
+    if (j.directSign.isApproval) {
+      setStatus('approving token spend (' + (step + 1) + ')…');
+      var approveHash = await window.directSignTx(j.directSign);
+      setStatus('waiting for approval to confirm…');
+      await window.waitForWalletReceipt(approveHash);
+      continue;
+    }
+    setStatus('signing in your wallet…');
     var txHash = await window.directSignTx(j.directSign);
-    // ledger: record the user-signed tx
-    await fetch('/api/direct-trade/record', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ kind: j.recordKind, ref: j.recordRef, txHash: txHash, chain: j.chain, asset: j.asset, amount: j.amount, symbol: j.symbol }) });
-    set('\\u2713 sent — tx ' + (txHash || '').slice(0, 10) + '…');
-    return { ok: true, txHash: txHash };
-  } catch (e) {
-    if (e && e.code === 4001) { set('rejected in wallet'); throw e; }
-    set(String(e.message || e));
-    throw e;
+    await fetch('/api/direct-trade/record', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: j.recordKind, ref: j.recordRef, txHash: txHash, chain: j.chain, amount: j.amount, symbol: j.symbol }) });
+    return { ok: true, txHash: txHash, directSigned: true };
   }
+  return { ok: false, error: 'too many approval steps — try again' };
 };
 `;

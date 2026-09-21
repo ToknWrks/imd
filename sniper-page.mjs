@@ -362,8 +362,7 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
             maxGasGwei: document.getElementById("maxGas").value,
             pool: chosenPool,
           };
-          const r = await fetch("/api/sniper/buy", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
-          const j = await r.json();
+          const j = await window.directSignTrade("/api/sniper/buy", body, (m) => { status.textContent = m; });
           status.textContent = j.ok ? "bought — tx " + j.txHash.slice(0, 10) + "…" : j.error;
           if (j.ok) setTimeout(() => location.reload(), 1200);
         } catch (e) { status.textContent = e.message; }
@@ -536,8 +535,7 @@ export function sniperPage({ shell, esc, explorerLink, getChain, ctx, userId = n
             maxGasGwei: document.getElementById("maxGas").value,
             pool: chosenPool || undefined,
           };
-          const r = await fetch("/api/sniper/sell", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
-          const j = await r.json();
+          const j = await window.directSignTrade("/api/sniper/sell", body, (m) => { status.textContent = m; });
           status.textContent = j.ok ? "sold — tx " + j.txHash.slice(0, 10) + "…" : j.error;
           if (j.ok) setTimeout(() => location.reload(), 1200);
         } catch (e) { status.textContent = e.message; }

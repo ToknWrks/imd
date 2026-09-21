@@ -497,7 +497,7 @@ export async function buildV4SellCall({ chainKey, tokenAddress, amountIn, slippa
  * pool objects. `pool` MUST be a V4 pool (dex === "V4") carrying
  * currency0/currency1/fee/tickSpacing/hooks.
  */
-async function executeV4Sell({ signer, chainKey, tokenAddress, amountIn, slippagePct, pool }) {
+export async function executeV4Sell({ signer, chainKey, tokenAddress, amountIn, slippagePct, pool }) {
   const n = getNetwork(chainKey);
   const c = publicClient(chainKey);
   const token = getAddress(tokenAddress);

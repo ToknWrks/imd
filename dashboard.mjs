@@ -55,7 +55,7 @@ import {
   updateWalletPosition, applyAccumulationStrategy, getAccumulationStrategy,
   setAccumulationStrategyActive, updateDipWatcherSlippage,
   insertDipTrade, getSniperTrades, reserveStrategyExecution, finalizeStrategyExecution,
-  addHoneypotToken, removeHoneypotToken,
+  addHoneypotToken, removeHoneypotToken, insertSniperTrade, touchSniperToken,
 } from "./db.mjs";
 import { formatUnits } from "viem";
 import { getTokenMeta, resolvePoolOverride, buyToken } from "./dip-swap.mjs";
@@ -608,15 +608,11 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         btn.disabled = true;
         status.textContent = 'selling…';
         try {
-          const r = await fetch('/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount, slippagePct: slippage }) });
-          const j = await r.json();
-          // Direct-sign flow (2026-09-21): co-pilot manual sells come back as a
-          // built tx — hand it to the wallet immediately, record the hash after.
-          if (j.ok && j.directSign) {
-            status.textContent = 'signing in your wallet…';
-            const txHash = await window.directSignTx(j.directSign);
-            await fetch('/api/direct-trade/record', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'exit', ref: exitCtx.id ?? exitCtx.watcherId, txHash, amount: -parseFloat(amount), symbol: exitCtx.symbol ?? null }) });
-            status.textContent = 'sent — tx ' + (txHash || '').slice(0, 14) + '… (check Etherscan for the receipt)';
+          const body = { amount, slippagePct: slippage };
+          const route = '/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit';
+          const j = await window.directSignTrade(route, body, function(m) { status.textContent = m; });
+          if (j.directSigned) {
+            status.textContent = 'sent — tx ' + (j.txHash || '').slice(0, 14) + '… (check Etherscan for the receipt)';
             setTimeout(() => location.reload(), 1500);
             return false;
           }
@@ -628,10 +624,10 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
           if (j.ok) {
             status.textContent = 'sold — tx ' + (j.txHash || '').slice(0, 14) + '…';
             setTimeout(() => location.reload(), 1500);
-          } else {
-            status.textContent = j.error;
-            btn.disabled = false;
+            return false;
           }
+          status.textContent = j.error;
+          btn.disabled = false;
         } catch (err) {
           status.textContent = err.code === 4001 ? 'rejected in wallet' : err.message;
           btn.disabled = false;
@@ -2163,7 +2159,7 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
     }
     const { buildDirectCurveSell } = await import("./direct-sell.mjs");
     const built = await buildDirectCurveSell({ tokenAddress: token, coinAmountWei: amountIn, sellerAddress: uid, slippagePct, chainKey, curveState, imdPerEth, universalRouter: dep.v4.universalRouter });
-    return { directSign: { to: built.to, data: built.data, value: "0", chainId, gas: built.gas } };
+    return { directSign: { to: built.to, data: built.data, value: "0", chainId, gas: built.gas, isApproval: built.isApproval } };
   }
 
   // AMM venues: resolve the venue, then build via the exported V4/V3 builders.
@@ -2179,10 +2175,13 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
       const { findBestV4Pool } = await import("./dip-swap.mjs");
       return await findBestV4Pool(token, chainKey);
     })();
-    const { buildV4SellCall } = await import("./sniper-extras.mjs");
-    const { call } = await buildV4SellCall({ chainKey, tokenAddress: token, amountIn, slippagePct, pool, recipient: watcher.user_id });
-    const { encodeFunctionData } = await import("viem");
-    return { directSign: { to: call.address, data: encodeFunctionData({ abi: call.abi, functionName: call.functionName, args: call.args }), value: (call.value ?? 0n).toString(), chainId } };
+    // buildDirectV4Sell wraps executeV4Sell's Permit2 allowance chain via a
+    // capture-signer — stages approve→approve→swap across repeated calls
+    // instead of sending the raw swap (which reverts TRANSFER_FROM_FAILED
+    // whenever the wallet hasn't already max-approved Permit2 for this token).
+    const { buildDirectV4Sell } = await import("./direct-sell.mjs");
+    const built = await buildDirectV4Sell({ chainKey, tokenAddress: token, amountIn, slippagePct, pool, sellerAddress: uid });
+    return { directSign: { to: built.to, data: built.data, value: built.value, chainId, isApproval: built.isApproval } };
   }
   throw new Error("no direct-sign venue for this token — use the Sniper page sell");
 }
@@ -2544,7 +2543,7 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
       try {
         const uid = sessionAddress(req);
         if (!uid) return json({ ok: false, error: "not signed in" });
-        const { kind, ref, txHash, amount, symbol } = JSON.parse(await readBody() || "{}");
+        const { kind, ref, txHash, amount, chain, symbol } = JSON.parse(await readBody() || "{}");
         if (!txHash) return json({ ok: false, error: "txHash required" });
         if (kind === "exit") {
           insertDipTrade({
@@ -2552,8 +2551,14 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
             buy_tx_hash: null, eth_spent: null, token_amount: Number(amount) || null,
             price_usd: null, status: "ok", execution_kind: "exit",
           });
+        } else if (kind === "buy") {
+          insertSniperTrade({ chain: chain || "ethereum", contract_address: String(ref || "").toLowerCase(), symbol: symbol ?? null, dex: "DIRECT SIGN (buy)", eth_spent: Number(amount) || 0, token_amount: null, buy_tx_hash: txHash, user_id: uid });
+          touchSniperToken({ chain: chain || "ethereum", contract_address: String(ref || ""), symbol: symbol ?? null, activate: true });
+        } else if (kind === "sell") {
+          insertSniperTrade({ chain: chain || "ethereum", contract_address: String(ref || "").toLowerCase(), symbol: symbol ?? null, dex: "DIRECT SIGN (sell)", eth_spent: 0, token_amount: Number(amount) || null, buy_tx_hash: txHash, user_id: uid });
+          touchSniperToken({ chain: chain || "ethereum", contract_address: String(ref || ""), symbol: symbol ?? null, activate: true });
         } else {
-          insertSniperTrade({ chain: "ethereum", contract_address: String(ref || "").toLowerCase(), symbol: symbol ?? null, dex: "DIRECT SIGN", eth_spent: 0, token_amount: kind === "buy" ? null : null, buy_tx_hash: txHash, user_id: uid });
+          insertSniperTrade({ chain: chain || "ethereum", contract_address: String(ref || "").toLowerCase(), symbol: symbol ?? null, dex: "DIRECT SIGN", eth_spent: 0, token_amount: null, buy_tx_hash: txHash, user_id: uid });
         }
         return json({ ok: true });
       } catch (e) { return json({ ok: false, error: e.message }); }

@@ -138,11 +138,32 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token, symbol, decimals, ethAmount, slippagePct, pool, maxGasGwei } = body;
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
+      const amountWei = BigInt(Math.round(parseFloat(ethAmount) * 1e18));
+
+      // Direct-sign (2026-09-21 UX): the user's click IS the approval — build
+      // the tx and let the browser wallet sign it directly, same as the
+      // /tokens watcher-exit flow. The old approval-modal path remains for
+      // autonomy (server holds the session key) below.
+      const { getUser } = await import("./users.mjs");
+      const mode = (getUser(uid)?.signer_mode) || "copilot";
+      if (mode === "copilot") {
+        const bal = await publicClient(chainKey).getBalance({ address: uid });
+        if (bal < amountWei) throw new Error(`insufficient ETH (have ${Number(bal)/1e18}, need ${ethAmount})`);
+        const { buildDirectSniperBuy } = await import("./direct-sell.mjs");
+        const built = await buildDirectSniperBuy({ chainKey, tokenAddress: token, ethAmount, slippagePct: parseFloat(slippagePct)||3, pool, buyerAddress: uid });
+        const chainId = chainKey === "base" ? 8453 : (chainKey === "robinhood" ? 4663 : 1);
+        json({
+          ok: true,
+          directSign: { to: built.to, data: built.data, value: built.value, chainId, isApproval: built.isApproval },
+          recordKind: "buy", recordRef: token, chain: chainKey, symbol: symbol ?? null, amount: parseFloat(ethAmount),
+        });
+        return true;
+      }
+
       // Per-user signer (2026-09-20) — the global resolveSigner() derived an
       // orphan account on hosted; buys must sign from the user's own wallet
-      // (autonomy: their registry SCW; co-pilot: the approval modal).
+      // (autonomy: their registry SCW).
       const signer = wrapSignerGas(await resolveSignerUser(uid, chainKey), maxGasGwei);
-      const amountWei = BigInt(Math.round(parseFloat(ethAmount) * 1e18));
       const bal = await signer.getEthBalanceWei();
       if (bal < amountWei) throw new Error(`insufficient ETH (have ${Number(bal)/1e18}, need ${ethAmount})`);
       let result;
@@ -447,12 +468,35 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const { chain, token, sellPct, slippagePct, maxGasGwei, pool } = JSON.parse(await readBody());
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
-      // Per-user signer (2026-09-20) — same rule as the buy route.
+      // Per-user signer (2026-09-20) — same rule as the buy route. resolveSignerUser
+      // is safe to call here even in co-pilot mode: we only read .address below,
+      // never .callContract() (that's what triggers the old approval modal).
       const signer = wrapSignerGas(await resolveSignerUser(uid, chainKey), maxGasGwei);
       const bal = await getTokenBalance(chainKey, token, signer.address);
       const pct = Math.min(100, Math.max(1, parseFloat(sellPct) || 100));
       const amountHuman = bal.formatted * (pct / 100);
       if (!(amountHuman > 0)) throw new Error("token balance is 0");
+
+      // Direct-sign (2026-09-21 UX): same rule as buy above. EXCEPT Robinhood
+      // LONG-platform sells with no explicit pool chosen — that's a two-leg
+      // trade (token→stock, then stock→ETH) where leg 2 needs leg 1 already
+      // mined; direct-sign can only stage one call per round-trip, so it
+      // falls through to the old approval-modal path (still intact) instead.
+      const { getUser } = await import("./users.mjs");
+      const mode = (getUser(uid)?.signer_mode) || "copilot";
+      const isLongCandidate = chainKey === "robinhood" && !pool?.dex;
+      if (mode === "copilot" && !isLongCandidate) {
+        const { buildDirectSniperSell } = await import("./direct-sell.mjs");
+        const built = await buildDirectSniperSell({ chainKey, tokenAddress: token, amountHuman, slippagePct: parseFloat(slippagePct)||3, pool, sellerAddress: uid });
+        const chainId = chainKey === "base" ? 8453 : (chainKey === "robinhood" ? 4663 : 1);
+        json({
+          ok: true,
+          directSign: { to: built.to, data: built.data, value: built.value, chainId, isApproval: built.isApproval },
+          recordKind: "sell", recordRef: token, chain: chainKey, symbol: bal.symbol ?? null, amount: amountHuman,
+        });
+        return true;
+      }
+
       const result = await executeSniperSell({ signer, chainKey, tokenAddress: token, amountHuman, slippagePct: parseFloat(slippagePct)||3, pool });
       insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: "SELL " + (result.label || result.dex), eth_spent: 0, token_amount: amountHuman, buy_tx_hash: result.txHash, eth_received: result.ethReceived ?? null, user_id: uid });
       // Selling this token makes it the bot's active target — the wallet's
