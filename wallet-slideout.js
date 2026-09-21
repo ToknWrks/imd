@@ -188,9 +188,10 @@ function renderSmartWalletSection(){
       return '<div class="sw-asset"><img class="sw-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px"><span>'+_we(t.symbol||'?')+'</span><span class="amount">'+bal(disp)+'</span>'+usd(usd2)+'</div>'+
         (browserWallet2?('<div class="sw-move-row"><input id="swInTok'+t.address.slice(0,8)+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMoveTokenIn('" + t.address + "','" + (t.decimals!=null?t.decimals:18) + "')" + '">Fund \u2192</button></div>'):'');
     };
-    if(j.imd&&!imdRows.length){
+    var walletData2=window._walletData||null;
+    if(walletData2&&walletData2.imd&&!imdRows.length){
       // IMD configured but not watched — still show it with its own Fund box.
-      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(s.imdSymbol||'IMD')+'</span><span>'+_we(s.imdSymbol||'IMD')+'</span><span class="amount">'+bal(j.imd.total)+'</span>'+(j.imd.totalUsd!=null?('<span class="usd">$'+_wfu(j.imd.totalUsd)+'</span>'):'')+'</div>';
+      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(s.imdSymbol||'IMD')+'</span><span>'+_we(s.imdSymbol||'IMD')+'</span><span class="amount">'+bal(walletData2.imd.total)+'</span>'+(walletData2.imd.totalUsd!=null?('<span class="usd">$'+_wfu(walletData2.imd.totalUsd)+'</span>'):'')+'</div>';
       if(browserWallet2){
         h2+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
         h2+=swHintRow('swInImdHint');
