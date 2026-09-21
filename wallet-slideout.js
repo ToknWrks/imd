@@ -186,7 +186,7 @@ function renderSmartWalletSection(){
       var iconUrl='/api/icon/token/'+encodeURIComponent(t.chain||'ethereum')+'/'+t.address+'?s='+encodeURIComponent(t.symbol||'');
       var usd2=t.priceUsd!=null&&disp!=null?disp*t.priceUsd:null;
       return '<div class="sw-asset"><img class="sw-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px"><span>'+_we(t.symbol||'?')+'</span><span class="amount">'+bal(disp)+'</span>'+usd(usd2)+'</div>'+
-        (browserWallet2?('<div class="sw-move-row"><input id="swInTok'+t.address.slice(0,8)+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn" onclick="swMoveTokenIn(\''+t.address+'\',\''+(t.decimals!=null?t.decimals:18)+'\')">Fund \u2192</button></div>'):'');
+        (browserWallet2?('<div class="sw-move-row"><input id="swInTok'+t.address.slice(0,8)+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMoveTokenIn('" + t.address + "','" + (t.decimals!=null?t.decimals:18) + "')" + '">Fund \u2192</button></div>'):'');
     };
     if(j.imd&&!imdRows.length){
       // IMD configured but not watched — still show it with its own Fund box.
@@ -225,7 +225,7 @@ function renderSmartWalletSection(){
       var usd2=t.priceUsd!=null&&disp!=null?disp*t.priceUsd:null;
       var idSuffix=t.address.slice(0,8);
       return '<div class="sw-asset"><img class="sw-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px"><span>'+_we(t.symbol||'?')+'</span><span class="amount">'+bal(disp)+'</span>'+usd(usd2)+'</div>'+
-        (browserWallet2&&disp!=null?('<div class="sw-move-row"><input id="swOutTok'+idSuffix+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillMaxToken(\''+t.address+'\',\''+(t.decimals!=null?t.decimals:18)+'\')">MAX</button><button class="sw-btn alt" onclick="swMoveTokenOut(\''+t.address+'\',\''+(t.decimals!=null?t.decimals:18)+'\')">\u2190 Move out</button></div>'):'');
+        (browserWallet2&&disp!=null?('<div class="sw-move-row"><input id="swOutTok'+idSuffix+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="' + "swFillMaxToken('" + t.address + "','" + (t.decimals!=null?t.decimals:18) + "')" + '">MAX</button><button class="sw-btn alt" onclick="' + "swMoveTokenOut('" + t.address + "','" + (t.decimals!=null?t.decimals:18) + "')" + '">\u2190 Move out</button></div>'):'');
     };
     if(!imdRows2.length&&s.imdToken!=null){
       // IMD configured but not watched — show its own display + Move out.
