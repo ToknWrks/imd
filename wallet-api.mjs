@@ -151,6 +151,25 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
     // IMD price for the slideout header/row display (ETH/IMD pool × ETH/USD).
     const imdPerEth = await getImdPerEth("ethereum").catch(() => 0);
     const imdUsd = imdPerEth > 0 ? (await getEthUsdPriceFor("ethereum").catch(() => 0)) / imdPerEth : 0;
+    // Per-wallet IMD split (2026-09-21): the slideout's owner and SCW cards
+    // each render IMD — a combined-only figure showed the full balance on
+    // BOTH cards after funds moved (e.g. IMD funded into the SCW still
+    // displayed on the owner card). Resolve both addresses once.
+    let imdOwner = null, imdScw = null;
+    if (userId) {
+      try {
+        const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+        const wArr = await resolveUserReadWallets(userId, "ethereum").catch(() => []);
+        if (wArr.length) {
+          const ownerIdx = Math.max(0, wArr.findIndex((a) => a.toLowerCase() === String(userId).toLowerCase()));
+          const { getChain: getChainDep } = await import("./chains.mjs");
+          const imdAddr = getChainDep("ethereum").imdToken;
+          const raws = await Promise.all(wArr.map((w) => getErc20Balance(imdAddr, w, "ethereum").catch(() => null)));
+          imdScw = raws[0] != null ? Number(raws[0]) / 1e18 : null;
+          imdOwner = raws[ownerIdx] != null ? Number(raws[ownerIdx]) / 1e18 : null;
+        }
+      } catch { /* split optional — combined total still renders */ }
+    }
 
     return json({
       ok: true,
@@ -158,7 +177,7 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
       walletSource: readAddress ? "session" : "signer",
       eth: { total: ethTotal, totalUsd: ethTotalUsd, chains: ethChains },
       usd: { totalUsd: usdTotalUsd, symbol: usdChains.some(c => c.symbol === "USDG") ? "USD" : "USDC", chains: usdChains },
-      imd: imdChains.length ? { total: imdTotal, totalUsd: imdTotal * imdUsd, perEth: imdPerEth, chains: imdChains } : null,
+      imd: imdChains.length ? { total: imdTotal, totalUsd: imdTotal * imdUsd, perEth: imdPerEth, chains: imdChains, ownerBalance: imdOwner, scwBalance: imdScw } : null,
       tokens,
       totalUsd: ethTotalUsd + usdTotalUsd + tokensUsd,
     });

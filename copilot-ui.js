@@ -48,9 +48,14 @@ function _cpE(s) { var d = {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}; ret
 function cpInit() {
   fetch('/api/copilot/pending').then(function(r){ return r.json(); }).then(function(j) {
     var area = document.getElementById('copilotArea');
-    if (area) area.style.display = (j.ok && j.active) ? 'inline' : 'none';
-    if (j.ok && j.active && j.count > 0) {
-      // Restored session: adopt pending requests (dedupe by id)
+    // Badge shows when requests exist for me, even if the global env flag is
+    // off (per-user mode governs; the env flag alone once hid live requests).
+    var hasPending = j.ok && j.requests && j.requests.length > 0;
+    if (area) area.style.display = (j.ok && (j.active || hasPending)) ? 'inline' : 'none';
+    if (hasPending) {
+      // Restored session: adopt pending requests (dedupe by id). Show the
+      // modal even when the global env flag is off — the request EXISTS and
+      // a trade is waiting on THIS user's approval.
       _cpQueue = j.requests.filter(function(r){ return !_cpCurrent || r.id !== _cpCurrent.id; });
       cpUpdateBadge(); cpShowNext();
     }

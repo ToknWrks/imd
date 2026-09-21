@@ -190,8 +190,10 @@ function renderSmartWalletSection(){
     };
     var walletData2=window._walletData||null;
     if(walletData2&&walletData2.imd&&!imdRows.length){
-      // IMD configured but not watched — still show it with its own Fund box.
-      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(s.imdSymbol||'IMD')+'</span><span>'+_we(s.imdSymbol||'IMD')+'</span><span class="amount">'+bal(walletData2.imd.total)+'</span>'+(walletData2.imd.totalUsd!=null?('<span class="usd">$'+_wfu(walletData2.imd.totalUsd)+'</span>'):'')+'</div>';
+      // IMD configured but not watched — per-wallet split (owner card shows
+      // the OWNER's IMD only, not the combined total).
+      var imdOwnerDisp = walletData2.imd.ownerBalance != null ? walletData2.imd.ownerBalance : walletData2.imd.total;
+      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(s.imdSymbol||'IMD')+'</span><span>'+_we(s.imdSymbol||'IMD')+'</span><span class="amount">'+bal(imdOwnerDisp)+'</span>'+(walletData2.imd.totalUsd!=null?('<span class="usd">$'+_wfu(imdOwnerDisp*walletData2.imd.totalUsd/(walletData2.imd.total||1))+'</span>'):'')+'</div>';
       if(browserWallet2){
         h2+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
         h2+=swHintRow('swInImdHint');
