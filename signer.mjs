@@ -42,7 +42,17 @@ export async function resolveSignerUser(userId, chainKey = "ethereum") {
   if (user.disabled === 1) throw new Error("account disabled");
 
   const mode = user.signer_mode || "copilot";
-  const cacheKey = `${userId}:${chainKey}`;
+  // mode is part of the cache key (2026-09-21 fix): it used to be
+  // `${userId}:${chainKey}` alone, so a resolved-or-FAILED signer from
+  // BEFORE a mode switch kept being returned after the switch — Settings'
+  // mode toggle never invalidated it, and dip-watcher.mjs/dashboard.mjs
+  // each cache independently anyway (separate processes). Baking mode into
+  // the key makes a mode switch naturally resolve fresh instead of relying
+  // on an invalidation call that didn't exist. A rejected resolution is
+  // also evicted below instead of poisoning the cache for the process's
+  // lifetime (found live: a stale rejected "AA_SESSION_KEY not set" kept
+  // failing every retry until a manual restart).
+  const cacheKey = `${userId}:${chainKey}:${mode}`;
   if (_signerPromises.has(cacheKey)) return _signerPromises.get(cacheKey);
 
   const p = (async () => {
@@ -67,6 +77,10 @@ export async function resolveSignerUser(userId, chainKey = "ethereum") {
     }
     throw new Error(`unknown signer_mode "${mode}"`);
   })();
+  // Evict on failure — a rejected resolution (missing session key, RPC
+  // hiccup, the AA_SESSION_KEY bug) must not poison this cache key for the
+  // rest of the process's life; the next call should get a fresh attempt.
+  p.catch(() => _signerPromises.delete(cacheKey));
   _signerPromises.set(cacheKey, p);
   return p;
 }

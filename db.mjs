@@ -496,18 +496,26 @@ export function applyAccumulationStrategy({ id, reviewId = "manual", watcherId, 
     const strategyId = existing ? existing.id : id;
     const deployedBudgetUsd = existing?.deployed_budget_usd ?? 0;
     const reservedBudgetUsd = existing?.reserved_budget_usd ?? 0;
+    // user_id (2026-09-21 fix): derived from the watcher, never left NULL.
+    // A NULL user_id here made resolveSignerUser fall back to the "system"
+    // signer, which requires the legacy AA_SESSION_KEY env var — unset on
+    // hosted per-user autonomy — so every scheduled/dip buy under an
+    // applied plan threw "AA_SESSION_KEY not set" instead of using the
+    // watcher owner's own registry session key (found live 2026-09-21).
+    const watcher = db.prepare("SELECT user_id FROM dip_watchers WHERE id = ?").get(watcherId);
+    const userId = watcher?.user_id ?? null;
     db.prepare("DELETE FROM accumulation_strategies WHERE watcher_id = ?").run(watcherId);
     db.prepare(`
       INSERT INTO accumulation_strategies (
         id, watcher_id, review_id, profile, total_budget_usd, max_buy_usd, base_buy_usd, dip_buy_usd,
         dip_threshold_usd, slippage_pct, cooldown_minutes, cadence_minutes, scheduled_allocation_usd,
-        dip_reserve_usd, start_at, end_at, next_scheduled_at, deployed_budget_usd, reserved_budget_usd
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        dip_reserve_usd, start_at, end_at, next_scheduled_at, deployed_budget_usd, reserved_budget_usd, user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       strategyId, watcherId, reviewId, proposal.profile, proposal.totalBudgetUsd, proposal.maxBuyUsd,
       proposal.baseBuyUsd, proposal.dipBuyUsd, proposal.dipThresholdUsd, proposal.slippagePct,
       proposal.cooldownMinutes, proposal.cadenceMinutes, proposal.scheduledAllocationUsd,
-      proposal.dipReserveUsd, proposal.startAt, proposal.endAt, nextScheduledAt, deployedBudgetUsd, reservedBudgetUsd
+      proposal.dipReserveUsd, proposal.startAt, proposal.endAt, nextScheduledAt, deployedBudgetUsd, reservedBudgetUsd, userId
     );
     db.prepare(`
       UPDATE dip_watchers SET threshold_usd = ?, buy_amount_usd = ?, slippage_pct = ?, cooldown_minutes = ?
