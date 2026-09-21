@@ -57,7 +57,7 @@ import {
   insertDipTrade, getSniperTrades, reserveStrategyExecution, finalizeStrategyExecution,
   addHoneypotToken, removeHoneypotToken, insertSniperTrade, touchSniperToken,
 } from "./db.mjs";
-import { formatUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import { getTokenMeta, resolvePoolOverride, buyToken } from "./dip-swap.mjs";
 import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wallet-slideout.js";
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
@@ -589,9 +589,21 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         const input = document.getElementById('exitAmount');
         input.value = bal > 0 ? (Math.round(amt * 1e9) / 1e9) : '';
         updateExitEstimate();
+        // "Sell 100%" flag (2026-09-21 fix, set AFTER updateExitEstimate —
+        // it clears this flag, since that's also the real typing handler):
+        // exitCtx.balance is a display float already rounded for the input
+        // box — round-tripping it back through wei on the server can
+        // overshoot the wallet's REAL on-chain balance and revert (same
+        // class of bug the sniper sell had). When this button was the last
+        // thing clicked, tell the server to read the exact on-chain balance
+        // itself instead of trusting this number. Typing in the box
+        // directly (the oninput handler, which this .value assignment does
+        // NOT fire) clears the flag back to 'false'.
+        exitCtx.sellAll = (p === 100) ? 'true' : 'false';
       }
       function updateExitEstimate() {
         if (!exitCtx) return;
+        exitCtx.sellAll = 'false';
         const amt = parseFloat(document.getElementById('exitAmount').value) || 0;
         const price = parseFloat(exitCtx.price) || 0;
         const est = document.getElementById('exitEstimate');
@@ -608,7 +620,7 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         btn.disabled = true;
         status.textContent = 'selling…';
         try {
-          const body = { amount, slippagePct: slippage };
+          const body = { amount, slippagePct: slippage, sellAll: exitCtx.sellAll === 'true' };
           const route = '/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit';
           const j = await window.directSignTrade(route, body, function(m) { status.textContent = m; });
           if (j.directSigned) {
@@ -2134,7 +2146,14 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
   const dep = getChain(chainKey);
   const chainId = chainKey === "base" ? 8453 : (chainKey === "robinhood" ? 4663 : 1);
   const meta = await getTokenMeta(token, chainKey);
-  const amountIn = BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
+  // sellAll passes a full-precision decimal STRING (formatUnits of the raw
+  // on-chain balance) — parseUnits recovers it exactly. A typed amount
+  // (plain number) keeps the old math; String(number) can hit exponential
+  // notation ("1e-7") that parseUnits rejects, same reasoning as
+  // executeSniperSell's identical branch (sniper-extras.mjs).
+  const amountIn = typeof amountHuman === "string"
+    ? parseUnits(amountHuman, Number(meta.decimals))
+    : BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
 
   // Curve coin: sellCurveCoin assembles the UR payload (commands 0x060c0f).
   const { getCurveCoinState, getImdPerEth } = await import("./dip-swap.mjs");
@@ -2192,21 +2211,46 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
       if (!watcher) return json({ ok: false, error: "token not found" });
       let amt = NaN; // hoisted so the catch block can persist the error row
       try {
-        if (!(await isSignerConfigured(sessionAddress(req)))) return json({ ok: false, error: "no wallet configured — set one in Settings" });
-        const { amount, slippagePct } = JSON.parse(await readBody());
-        amt = Number(amount);
-        if (!(amt > 0)) return json({ ok: false, error: "amount must be a positive number" });
+        const uid = sessionAddress(req);
+        if (!(await isSignerConfigured(uid))) return json({ ok: false, error: "no wallet configured — set one in Settings" });
+        const { amount, slippagePct, sellAll } = JSON.parse(await readBody());
+        // sellAmountHuman feeds buildSellTx/executeSniperSell. sellAll (the
+        // "100%" quick button, 2026-09-21 fix): the client's balance display
+        // is already a lossy rounded float — round-tripping IT back through
+        // wei can overshoot the wallet's REAL on-chain balance and revert
+        // the transferFrom even with a sufficient Permit2 allowance (the
+        // exact bug the sniper sell had). Read the raw on-chain balance here
+        // instead and pass its full-precision decimal STRING through —
+        // buildSellTx/executeSniperSell parse it back exactly (no float
+        // round-trip at all). A manually typed amount is unaffected: humans
+        // don't type 18 decimal places, so the existing float path is fine.
+        let sellAmountHuman;
+        if (sellAll) {
+          const { getTokenBalance } = await import("./sniper-extras.mjs");
+          const bal = await getTokenBalance(watcher.chain || "ethereum", watcher.contract_address, uid);
+          if (!(BigInt(bal.raw) > 0n)) return json({ ok: false, error: "token balance is 0" });
+          sellAmountHuman = formatUnits(BigInt(bal.raw), bal.decimals);
+          amt = Number(sellAmountHuman);
+        } else {
+          amt = Number(amount);
+          if (!(amt > 0)) return json({ ok: false, error: "amount must be a positive number" });
+          sellAmountHuman = amt;
+        }
         const slippage = Number(slippagePct ?? watcher.slippage_pct ?? 3);
         // Direct-sign (2026-09-21 UX): the user's click IS the approval — in
         // co-pilot mode we return the BUILT tx for the browser to sign in one
         // step (Rabby pops), then /api/direct-trade/record lands it in the
         // ledger. The modal flow remains only for unattended engine trades.
-        const uid = sessionAddress(req);
         const { getUser } = await import("./users.mjs");
         const u = getUser(uid);
         const mode = u?.signer_mode || "copilot";
         if (mode === "copilot") {
-          const built = await buildSellTx(watcher, amt, slippage, uid);
+          const built = await buildSellTx(watcher, sellAmountHuman, slippage, uid);
+          // buildSellTx's curve-native-balance guard returns { ok: false,
+          // error, launchpad, curveNative: true } with no directSign — that
+          // was falling through to the ok:true response below and silently
+          // reporting a curve-native "can't sell here" refusal as success.
+          if (built.ok === false) return json(built);
           return json({
             ok: true,
             directSign: built.directSign,
@@ -2224,7 +2268,7 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
           signer,
           chainKey: watcher.chain || "ethereum",
           tokenAddress: watcher.contract_address,
-          amountHuman: amt,
+          amountHuman: sellAmountHuman,
           slippagePct: Number.isFinite(slippage) && slippage > 0 ? slippage : 3,
           pool: watcher.pool_address ?? null, // saved V4 poolId/V3 address beats Dexscreener (which rate-limits)
         });
