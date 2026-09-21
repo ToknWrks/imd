@@ -582,20 +582,29 @@ export async function activateSmartWallet(chainKey = "ethereum", { browserFrom =
 }
 
 /**
- * v2 AUTONOMY GRANT (plan 2026-09-20, refined sequencing): generate the user's
- * session key, store it encrypted, and return the installValidation UO payload
- * for the BROWSER (owner EOA) to sign and submit via the EntryPoint. The grant
- * rides entity 1 (SingleSignerValidationModule) with selectors
- * [execute, executeBatch] — exactly the shape proven on the 2026-09-20 fork
- * dry run (session-key-only UO mined and transferred).
+ * v2 AUTONOMY GRANT (2026-09-21 rewrite — was a UserOp/EntryPoint flow, now a
+ * DIRECT owner-execute, same proven pattern as quoteDirectSweepV2).
  *
- * The UO signature is NOT the 1271-packed owner format: for a non-global entity
- * the account validates a raw `0xFF 0x00 <ecdsa>` signature over the userOpHash
- * (verified live — packUOSignature shape).
+ * ROOT CAUSE of every grant failing on-chain (found live 2026-09-21, traced
+ * from a production AA23 on an autonomy trade all the way back to this): the
+ * OLD flow wrapped installValidation in a UserOperation whose nonce used
+ * ENTITY 1's key (256) — but entity 1 doesn't exist until THIS call installs
+ * it. The EntryPoint routes a UserOp's validation to whatever validator is
+ * registered for its nonce key; with no entity-1 validator installed yet,
+ * the account's own validateUserOp had nothing to check against and threw —
+ * "AA23 reverted" on the GRANT tx itself, every single time, for every
+ * wallet. The registry still got marked "granted" regardless (a SEPARATE
+ * bug fixed the same day in confirmGrant — see its own comment) because
+ * nothing ever checked the grant tx's receipt. Circular by construction: no
+ * amount of nonce/signature-format tweaking fixes a UserOp that authorizes
+ * itself via an entity that doesn't exist until it lands.
  *
- * The caller (UI) submits handleOps with the browser's signature; then calls
- * confirmGrant() to record grantStatus + AA_SESSION_KEY. Co-pilot users never
- * call this — no key is generated, nothing to back up.
+ * Fix: skip the EntryPoint for the grant entirely. The owner already has
+ * native authority to call `execute()` directly on their own SMA (this is
+ * exactly how quoteDirectSweepV2 moves funds pre-grant, fork-verified
+ * 2026-09-20) — no UserOp, no nonce key, no signature-packing scheme needed.
+ * installValidation is just another call routed through that same
+ * owner-authorized execute(), sent as a single plain `eth_sendTransaction`.
  */
 export async function grantSessionKeyForOwner(userId, chainKey = "ethereum", { browserFrom = null } = {}) {
   if (!userId || !/^0x[0-9a-fA-F]{40}$/.test(userId)) throw new Error("userId required");
@@ -608,11 +617,10 @@ export async function grantSessionKeyForOwner(userId, chainKey = "ethereum", { b
   const scwAddress = getAddress(rec.scwAddress);
   const pub = await publicClientFor(chainKey);
   const code = await pub.getCode({ address: scwAddress }).catch(() => "0x");
-  if (!code || code === "0x") throw new Error("smart wallet is not deployed yet — activate it first (the grant UO's sender must exist on-chain)");
+  if (!code || code === "0x") throw new Error("smart wallet is not deployed yet — activate it first");
 
   // Reuse an already-generated key (idempotent re-quotes); mint only if absent.
   let sessionKey = rec.sessionKeyEnc ? decryptSessionKey(rec.sessionKeyEnc) : null;
-  let generated = false;
   if (!sessionKey) {
     const { generatePrivateKey } = await import("viem/accounts");
     sessionKey = generatePrivateKey();
@@ -630,63 +638,36 @@ export async function grantSessionKeyForOwner(userId, chainKey = "ethereum", { b
     grantStatus: "pending",
   });
 
-  // Build the installValidation self-execute calldata (entity 1, selectors
-  // execute + executeBatch, signer = session-key EOA). Verified encoding —
-  // see scripts/.dryrun-sessionkey.mjs (grant leg, ValidationFunctionMissing fix).
+  // installValidation (entity 1, selectors execute + executeBatch, signer =
+  // session-key EOA). Sent DIRECTLY, unwrapped — the Alchemy SDK's own
+  // encodeCallData (modularAccountV2Base.js) explicitly skips the execute()
+  // wrapper for a self-targeting call ("target === accountAddress ? data :
+  // execute(target, value, data)"). Wrapping it anyway (the old bug) sent a
+  // call shape the account's dispatch doesn't recognize as authorized —
+  // confirmed by a free eth_call simulation reverting with it wrapped and
+  // succeeding once unwrapped (2026-09-21).
   const ssv = ssvModuleAddress(chainKey);
   const validationConfig = concat([ssv, toHex(1, { size: 4 }), toHex(0x01, { size: 1 })]); // isUserOpValidation only
-  const callData = encodeFunctionData({
-    abi: parseAbi(["function execute(address target, uint256 value, bytes data)"]),
-    functionName: "execute",
+  const data = encodeFunctionData({
+    abi: parseAbi(["function installValidation(bytes25 validationConfig, bytes4[] selectors, bytes installData, bytes[] hooks)"]),
+    functionName: "installValidation",
     args: [
-      scwAddress,
-      0n,
-      encodeFunctionData({
-        abi: parseAbi(["function installValidation(bytes25 validationConfig, bytes4[] selectors, bytes installData, bytes[] hooks)"]),
-        functionName: "installValidation",
-        args: [
-          validationConfig,
-          ["0xb61d27f6", "0x34fcd5be"], // execute, executeBatch
-          encodeAbiParameters([{ type: "uint32" }, { type: "address" }], [1, sessionKeyAddress]),
-          [],
-        ],
-      }),
+      validationConfig,
+      ["0xb61d27f6", "0x34fcd5be"], // execute, executeBatch
+      encodeAbiParameters([{ type: "uint32" }, { type: "address" }], [1, sessionKeyAddress]),
+      [],
     ],
   });
-
-  const EP = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
-  const pubEp = getContract({ address: EP, abi: parseAbi(["function getNonce(address sender, uint192 key) view returns (uint256)"]), client: pub });
-  // Entity-1, non-global nonce key = (0 << 40) | (1 << 8) | 0 = 256
-  const nonce = await pubEp.read.getNonce([scwAddress, 256n]);
-
-  const userOp = {
-    sender: scwAddress,
-    nonce: "0x" + nonce.toString(16),
-    initCode: "0x",
-    callData,
-    verificationGasLimit: "0x" + (400000).toString(16),
-    callGasLimit: "0x" + (400000).toString(16),
-    preVerificationGas: "0x" + (120000).toString(16),
-    maxFeePerGas: "0x" + (30_000_000_000n).toString(16),
-    maxPriorityFeePerGas: "0x" + (1_000_000_000n).toString(16),
-    paymasterAndData: "0x",
-    // signature: the BROWSER owner signs userOpDigest(userOp) and the UI sends
-    // the raw 65-byte personal_sign result; the submit endpoint packs it with
-    // packUOSignature → "0xFF00"+sig. No 1271 packing for non-global entities.
-    signature: "SIGN_IN_BROWSER",
-  };
-  const { userOpDigest } = await import("./smart-account.mjs");
-  const digestToSign = userOpDigest(chainKey, userOp);
 
   return {
     ok: true,
     browserSign: true,
     schema: 2,
-    entryPoint: EP,
-    userOp,
-    digestToSign,
+    directExecute: true,   // UI: plain eth_sendTransaction, NOT handleOps
+    to: scwAddress,
+    data,
     sessionKeyAddress,
-    gasEstimateEth: 0.003,
+    gasEstimateEth: 0.0002,
     message: "Sign the grant in your browser wallet — this adds the app's session key as an operator that can trade from your smart wallet.",
   };
 }

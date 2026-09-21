@@ -246,12 +246,12 @@ function renderSmartWalletSection(){
     else{
       h2+='<span class="hint">\u2713 deployed on-chain';
       if(s.grantStatus==='granted'){h2+=' \u00b7 \u2713 automation on (session key active)';}
-      else if(s.grantStatus==='pending'){h2+=' \u00b7 grant pending \u2014 finish it below';}
+      else if(s.grantStatus==='pending'){h2+=' \u00b7 grant not yet confirmed \u2014 try again below';}
       else{h2+=' \u2014 co-pilot mode';}
       h2+='</span>';
       if(browserWallet2&&s.grantStatus!=='granted'){
-        h2+='<div style="margin-top:0.5rem"><button class="sw-btn alt" onclick="swGrantAutonomy()">'+(s.grantStatus==='pending'?'Finish grant (sign in wallet)':'Enable automated trading')+'</button></div>';
-        h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Adds the app\u2019s session key as an operator of THIS wallet (one signed tx, \u22480.003 ETH gas). Skip it to stay in co-pilot \u2014 no key is ever stored until you do.</div>';
+        h2+='<div style="margin-top:0.5rem"><button class="sw-btn alt" onclick="swGrantAutonomy()">Enable automated trading</button></div>';
+        h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Adds the app\u2019s session key as an operator of THIS wallet (one signed tx, \u22480.0002 ETH gas). Skip it to stay in co-pilot \u2014 no key is ever stored until you do.</div>';
       }
     }
     h2+='</div></div>';
@@ -720,7 +720,11 @@ async function swMoveOutBrowser(asset){
     _swStatus(String(e.message||e).slice(0,160),false,true);
   }
 }
-// Autonomy grant: quote → browser signs the digest → browser submits handleOps.
+// Autonomy grant (2026-09-21 rewrite): single plain transaction, same
+// proven pattern as the sweep (swMoveOutBrowser) — no UserOp/EntryPoint
+// digest-signing step. The old 2-step handleOps flow had a circular nonce
+// bug that made every grant revert on-chain (AA23) regardless of signature
+// correctness; see grantSessionKeyForOwner's comment in smart-wallet-api.mjs.
 async function swGrantAutonomy(){
   var btn=event&&event.target;
   if(btn){btn.disabled=true;btn.textContent='Preparing grant…';}
@@ -729,10 +733,10 @@ async function swGrantAutonomy(){
     var r=await fetch('/api/smart-wallet/grant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
     var j=await r.json();
     if(!j.ok)throw new Error(j.error||'grant quote failed');
-    if(!j.digestToSign)throw new Error('grant payload missing digest');
-    _swStatus('Step 1 of 2 — grant prepared. Your wallet will ask to SIGN the authorization…',true);
-    var txHash=await swSignAndSubmit(j,'grant',1,2);
-    _swStatus('\u2713 Both steps done — grant sent, tx '+(txHash||'').slice(0,10)+'… waiting for it to mine…',true);
+    if(!j.directExecute||!j.to||!j.data)throw new Error('grant payload missing execute call');
+    _swStatus('signing in your wallet (single step)…',true);
+    var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:_wcAddress,to:j.to,data:j.data,chainId:chainIdHexFor(_swState.chain),gas:'0x'+Number(300000).toString(16)}]});
+    _swStatus('\u2713 sent, tx '+(txHash||'').slice(0,10)+'… waiting for it to mine…',true);
     // Poll status until grantStatus flips — the server now checks the ACTUAL
     // grant tx's receipt (2026-09-21 fix: it used to trust this poll firing
     // at all as proof, which persisted "granted" even for a reverted grant).
@@ -756,7 +760,7 @@ async function swGrantAutonomy(){
       }catch{}
     }
     _swStatus('grant submitted — automation activates when the tx lands',false,true);
-    if(btn){btn.disabled=false;btn.textContent='Finish grant (sign in wallet)';}
+    if(btn){btn.disabled=false;btn.textContent='Enable automated trading';}
   }catch(e){
     if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);}
     else _swStatus(String(e.message||e).slice(0,180),false,true);
