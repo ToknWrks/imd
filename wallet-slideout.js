@@ -733,16 +733,24 @@ async function swGrantAutonomy(){
     _swStatus('Step 1 of 2 — grant prepared. Your wallet will ask to SIGN the authorization…',true);
     var txHash=await swSignAndSubmit(j,'grant',1,2);
     _swStatus('\u2713 Both steps done — grant sent, tx '+(txHash||'').slice(0,10)+'… waiting for it to mine…',true);
-    // Poll status until grantStatus flips (the server reads the chain, not our word)
+    // Poll status until grantStatus flips — the server now checks the ACTUAL
+    // grant tx's receipt (2026-09-21 fix: it used to trust this poll firing
+    // at all as proof, which persisted "granted" even for a reverted grant).
     var deadline=Date.now()+180000;
     while(Date.now()<deadline){
       await new Promise(function(res){setTimeout(res,6000);});
       try{
-        var c=await fetch('/api/smart-wallet/grant/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain})});
+        var c=await fetch('/api/smart-wallet/grant/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,txHash:txHash})});
         var cj=await c.json();
         if(cj.ok&&cj.grantStatus==='granted'){
           _swStatus('\u2713 automation enabled — the app can now trade from your smart wallet');
           setTimeout(function(){openWallet();},1800);
+          return;
+        }
+        if(cj.ok&&cj.verified===false&&cj.error){
+          // Definitive failure (reverted on-chain) — stop polling, re-show the button now.
+          _swStatus(cj.error,false,true);
+          if(btn){btn.disabled=false;btn.textContent='Enable automated trading';}
           return;
         }
       }catch{}

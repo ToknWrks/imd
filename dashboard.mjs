@@ -2553,9 +2553,9 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
     }
     if (url === "/api/smart-wallet/grant/confirm" && method === "POST") {
       try {
-        const { chain } = JSON.parse(await readBody() || "{}");
+        const { chain, txHash } = JSON.parse(await readBody() || "{}");
         const { confirmGrant } = await import("./smart-wallet-api.mjs");
-        return json(await confirmGrant(sessionAddress(req), chain || "ethereum"));
+        return json(await confirmGrant(sessionAddress(req), chain || "ethereum", txHash || null));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
     // Note: the grant/sweep UOs are submitted by the BROWSER (eth_sendTransaction

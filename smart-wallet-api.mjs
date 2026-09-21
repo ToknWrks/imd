@@ -757,13 +757,52 @@ async function relayUserOp(chainKey, userOp, { label = "uo" } = {}) {
 }
 
 /** After the browser's grant UO lands: flip grantStatus → granted and warm the
- *  AA client with the new key. Idempotent; safe to call after polling. */
-export async function confirmGrant(userId, chainKey = "ethereum") {
+ *  AA client with the new key. Idempotent; safe to call after polling.
+ *
+ * Verification (2026-09-21 fix): this used to persist "granted" purely on
+ * the browser's word that it submitted handleOps, with no check the tx
+ * actually succeeded. A reverted/never-mined grant left entity 1 without
+ * `execute` authorized, but the UI hid the retry button because the
+ * registry said "granted" anyway (found live — traced a production AA23
+ * failure on a real trade back to this). An EARLIER attempt at this fix
+ * dry-ran a trivial call via `client.estimateUserOperationGas()` expecting
+ * it to fail the same way `sendUserOperation()` does for an ungranted
+ * entity — it didn't: the two AA-SDK actions don't validate equivalently
+ * (found live testing this very fix — `estimateUserOperationGas` returned
+ * success against a wallet that `sendUserOperation` reliably rejected with
+ * `ValidationFunctionMissing`). Don't reintroduce an SDK-action-based dry
+ * run as a proxy for "did the grant land" — check the ACTUAL grant tx's
+ * receipt instead; that's unambiguous ground truth. */
+export async function confirmGrant(userId, chainKey = "ethereum", txHash = null) {
   const rec = getWalletRecord(userId);
   if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
   if (!rec.sessionKeyEnc) throw new Error("no session key stored — call grantSessionKeyForOwner first");
   const sk = decryptSessionKey(rec.sessionKeyEnc);
   if (!sk) throw new Error("stored session key unreadable (MASTER_KEY?)");
+
+  if (txHash) {
+    const dep = getChain(chainKey);
+    const pub = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
+    const receipt = await pub.getTransactionReceipt({ hash: txHash }).catch(() => null);
+    if (!receipt) {
+      // Not mined yet — keep whatever status is already stored; the client
+      // polls again shortly. Not a verdict either way.
+      return { ok: true, grantStatus: rec.grantStatus, verified: false, pending: true };
+    }
+    if (receipt.status !== "success") {
+      if (rec.grantStatus === "granted") {
+        setWalletRecord(userId, {
+          scwAddress: rec.scwAddress, ownerEoa: rec.ownerEoa, salt: rec.salt,
+          sessionKeyAddress: rec.sessionKeyAddress, sessionKeyEnc: rec.sessionKeyEnc,
+          grantStatus: "pending",
+        });
+      }
+      return {
+        ok: true, grantStatus: "pending", verified: false,
+        error: "grant transaction reverted on-chain — try “Enable automated trading” again",
+      };
+    }
+  }
   process.env.AA_SESSION_KEY = sk;
   invalidateSmartAccountClient(chainKey);
   setWalletRecord(userId, {
