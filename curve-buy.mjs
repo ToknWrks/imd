@@ -249,6 +249,47 @@ export async function sellCurveCoin(signer, tokenAddress, coinAmountWei, { slipp
     w(3n) + w(0x60n) + w(0x200n) + w(0x260n) +
     w(0x180n) + swapParams + w(0x40n) + settleParams + w(0x40n) + takeParams;
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+
+  // Permit2 approval chain (curve sells pull the COIN from the wallet via
+  // Permit2; buys pay msg.value and need none). Two one-time txs per coin —
+  // see accumulate-debugging/references/curve-execution-imd.md: the FIRST
+  // sell without these reverts AllowanceExpired(0) and reads as a dead
+  // button. Both are idempotent max-approvals; skip when already covered.
+  const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+  const MAX_U256 = 2n ** 256n - 1n;
+  const MAX_U160 = (1n << 160n) - 1n;
+  const MAX_U48 = (1n << 48n) - 1n;
+  const c = (await import("./sniper-swap.mjs")).publicClient(chainKey);
+  const erc20Abi = parseAbi(["function allowance(address owner, address spender) view returns (uint256)"]);
+  const p2Abi = parseAbi(["function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)"]);
+  const [erc20Allowance, p2] = await Promise.all([
+    c.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [signer.address, PERMIT2] }).catch(() => 0n),
+    c.readContract({ address: PERMIT2, abi: p2Abi, functionName: "allowance", args: [signer.address, token, getAddress(universalRouter)] }).catch(() => ({ amount: 0n, expiration: 0n })),
+  ]);
+  if (erc20Allowance < coinAmountWei) {
+    const txHash = await signer.callContract({
+      address: token,
+      abi: parseAbi(["function approve(address spender, uint256 amount) returns (bool)"]),
+      functionName: "approve",
+      args: [PERMIT2, MAX_U256],
+      copilot: { kind: "approve", product: "sniper", summary: "Approve token → Permit2 (one-time, curve sell prerequisite)" },
+    });
+    await (await import("./sniper-extras.mjs")).waitForTxReceipt(chainKey, txHash);
+  }
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  const p2amt = p2?.amount ?? 0n;
+  const p2exp = BigInt(p2?.expiration ?? 0n);
+  if (p2amt < coinAmountWei || p2exp <= nowSec) {
+    const txHash = await signer.callContract({
+      address: PERMIT2,
+      abi: parseAbi(["function approve(address token, address spender, uint160 amount, uint48 expiration) returns ()"]),
+      functionName: "approve",
+      args: [token, getAddress(universalRouter), MAX_U160, MAX_U48],
+      copilot: { kind: "approve", product: "sniper", summary: "Permit2 → Universal Router allowance (one-time, curve sell prerequisite)" },
+    });
+    await (await import("./sniper-extras.mjs")).waitForTxReceipt(chainKey, txHash);
+  }
+
   const call = {
     address: getAddress(universalRouter),
     abi: parseAbi(["function execute(bytes commands, bytes[] inputs, uint256 deadline) payable"]),

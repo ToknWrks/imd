@@ -45,6 +45,11 @@ var _cpQueue = [], _cpCurrent = null, _cpTimer = null, _cpSse = null, _cpBusy = 
 
 function _cpE(s) { var d = {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}; return String(s == null ? '' : s).replace(/[<>&"]/g, function(c){ return d[c]; }); }
 
+// chainId hex for the sign request's chain (mirrors wallet-slideout's helper).
+function chainIdHexForCp(chain) {
+  return chain === 'base' ? '0x2105' : (chain === 'robinhood' ? '0x1237' : '0x1');
+}
+
 function cpInit() {
   fetch('/api/copilot/pending').then(function(r){ return r.json(); }).then(function(j) {
     var area = document.getElementById('copilotArea');
@@ -176,7 +181,10 @@ async function cpApprove() {
   var btn = document.getElementById('cpApprove');
   if (btn) { btn.disabled = true; btn.textContent = 'Signing\\u2026'; }
   try {
-    var tx = { to: req.to, data: req.data, value: '0x' + BigInt(req.value || '0').toString(16) };
+    var accts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    var from = accts && accts[0];
+    if (!from) { cpToast('No active account in your wallet'); return; }
+    var tx = { from: from, to: req.to, data: req.data || '0x', value: '0x' + BigInt(req.value || '0').toString(16), chainId: chainIdHexForCp(req.chain) };
     var txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [tx] });
     var r = await fetch('/api/copilot/resolve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: req.id, txHash: txHash }) });
     var j = await r.json();
