@@ -277,8 +277,10 @@ export async function sellCurveCoin(signer, tokenAddress, coinAmountWei, { slipp
     await (await import("./sniper-extras.mjs")).waitForTxReceipt(chainKey, txHash);
   }
   const nowSec = BigInt(Math.floor(Date.now() / 1000));
-  const p2amt = p2?.amount ?? 0n;
-  const p2exp = BigInt(p2?.expiration ?? 0n);
+  // viem returns the Permit2 allowance tuple POSITIONALLY ([amount, expiration, nonce]),
+  // not named fields (documented in curve-execution-imd.md) — handle both shapes.
+  const p2amt = BigInt(Array.isArray(p2) ? (p2[0] ?? 0n) : (p2?.amount ?? 0n));
+  const p2exp = BigInt(Array.isArray(p2) ? (p2[1] ?? 0n) : (p2?.expiration ?? 0n));
   if (p2amt < coinAmountWei || p2exp <= nowSec) {
     const txHash = await signer.callContract({
       address: PERMIT2,
