@@ -2436,9 +2436,9 @@ const server = createServer(async (req, res) => {
     // UO) remains available as a legacy fallback but nothing calls it now.
     if (url === "/api/smart-wallet/move-out-v2" && method === "POST") {
       try {
-        const { chain, asset, amount, from } = JSON.parse(await readBody() || "{}");
+        const { chain, asset, amount, from, tokenAddress, tokenDecimals } = JSON.parse(await readBody() || "{}");
         const { quoteDirectSweepV2 } = await import("./smart-wallet-api.mjs");
-        return json(await quoteDirectSweepV2(sessionAddress(req), chain || "ethereum", { asset: asset || "eth", amount, browserFrom: from || null }));
+        return json(await quoteDirectSweepV2(sessionAddress(req), chain || "ethereum", { asset: asset || "eth", amount, browserFrom: from || null, tokenAddress: tokenAddress || null, tokenDecimals: tokenDecimals ?? null }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
 

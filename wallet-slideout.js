@@ -57,6 +57,14 @@ function _wf(n) { return n == null ? '\u2014' : Number(n).toLocaleString(void 0,
 function _wfu(n) { return n == null ? '\u2014' : Number(n).toLocaleString(void 0, {maximumFractionDigits:2}); }
 function _we(s) { var d={'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}; return String(s||'').replace(/[<>&"]/g,function(c){return d[c];}); }
 function _toggleAccordion(el) { el.parentElement.classList.toggle('open'); }
+// SCW-side balance for the flat wallet rows: reads the smart-wallet status
+// cache when loaded (loadSmartWalletSection fills window._swScwBalances);
+// before it loads, shows an em-dash placeholder.
+function scwRowBal(scwRow, asset) {
+  if (!scwRow) return '\u2014';
+  const v = asset === 'eth' ? scwRow.eth : scwRow.imd;
+  return v == null ? '\u2014' : v;
+}
 
 async function openWallet() {
   var o=document.getElementById('walletOverlay'), c=document.getElementById('walletContent');
@@ -65,74 +73,41 @@ async function openWallet() {
     var r=await fetch('/api/wallet'), j=await r.json();
     if(!j.ok){c.innerHTML='<div class="wallet-loading">'+_we(j.error||'unavailable')+'</div>';return;}
     var h='';
-    h+='<div class="wallet-accordion open">'+
-      '<div class="wallet-accordion-header" onclick="_toggleAccordion(this)">'+
-      '<span class="wallet-token-icon" style="background:#627eea;color:#fff">&Xi;</span>'+
-      '<span>ETH</span>'+
-      '<span class="arrow" style="margin-left:auto">\u25b6</span>'+
-      '<span class="amount">'+_wf(j.eth.total)+' ETH</span>'+
-      '<span class="usd">$'+_wfu(j.eth.totalUsd)+'</span>'+
-      '</div><div class="wallet-accordion-body">';
-    // Per-chain rows filtered to ETHEREUM (2026-09-19): robinhood + base
-    // rows removed from the wallet UI — the platform is mainnet-only, and
-    // the legacy chains' balances were zero-row noise. The API still returns
-    // them; this is display filtering only.
-    j.eth.chains.filter(function(c){return c.name==='Ethereum';}).forEach(function(c){
+    // FLAT WALLET LIST (2026-09-20): no accordions — every asset is one row,
+    // with the owner and SCW balances side by side. Moving funds in/out lives
+    // in the smart-wallet section below (which owns the only move inputs).
+    var rowAsset=function(icon,label,ownerBal,scwBal,usdVal,extra,scwId){
+      return '<div class="wallet-chain-row">'+
+        (icon)+
+        '<span>'+label+'</span>'+
+        '<span class="amount" title="owner wallet">'+_wf(ownerBal)+'</span>'+
+        '<span class="amount" style="opacity:0.75" title="smart wallet"'+(scwId?(' id="'+scwId+'"'):'')+'>'+_wf(scwBal)+'</span>'+
+        '<span class="usd">'+(usdVal!=null?('$'+_wfu(usdVal)):'')+'</span>'+
+        (extra||'')+
+        '</div>';
+    };
+    var ethIcon='<span class="wallet-token-icon" style="background:#627eea;color:#fff">&Xi;</span>';
+    h+=rowAsset(ethIcon,'ETH',j.eth.total,'\u2014',j.eth.totalUsd,null,'scwBalEth');
+    // IMD row (the platform/launchpad token) — both wallets, like ETH.
+    if (j.imd) {
+      h+=rowAsset('<span class="wallet-token-icon" style="background:#e8b661;color:#0b0d10">IMD</span>',j.imdSymbol||'IMD',j.imd.total,'\u2014',j.imd.totalUsd,null,'scwBalImd');
+    }
+    // Watched tokens — combined balance (SCW + EOA summed upstream) with USD
+    // value and P/L. Balance source note: these rows already sum both wallets.
+    (j.tokens||[]).forEach(function(t){
+      var iconUrl='/api/icon/token/'+encodeURIComponent(t.chain||'ethereum')+'/'+t.address+'?s='+encodeURIComponent(t.symbol||'');
+      var pl = t.unrealizedPlUsd != null
+        ? ' <span style="color:'+(t.unrealizedPlUsd >= 0 ? '#4ade80' : '#f87171')+';font-size:0.7rem">P/L '+(t.unrealizedPlUsd >= 0 ? '+' : '')+'$'+_wfu(Math.abs(t.unrealizedPlUsd))+'</span>'
+        : '';
+      var price = t.priceUsd != null ? '<span class="usd">@ $'+(t.priceUsd < 0.01 ? t.priceUsd.toPrecision(4) : _wfu(t.priceUsd))+'</span>' : '';
       h+='<div class="wallet-chain-row">'+
-        '<span class="chain-icon" style="background:'+c.color+';color:#fff">'+c.initials+'</span>'+
-        '<span>'+c.name+(c.error?' <span style="color:#f87171;font-size:0.7rem">\u26a0</span>':'')+'</span>'+
-        '<span class="amount">'+_wf(c.balance)+' ETH</span>'+
-        '<span class="usd">$'+_wfu(c.balanceUsd)+'</span>'+
+        '<img class="wallet-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px">'+
+        '<span>'+_we(t.symbol||'Unknown')+(t.positionError?' \u26a0':'')+'</span>'+
+        '<span class="amount">'+_wf(t.balance)+'</span>'+
+        '<span class="amount" style="opacity:0.35">\u2014</span>'+
+        '<span class="usd">$'+_wfu(t.balanceUsd)+'</span>'+price+pl+
         '</div>';
     });
-    h+='</div></div>';
-    // IMD accordion — the platform token (launchpad currency). Null when the
-    // API has no IMD row (e.g. no token configured).
-    if (j.imd) {
-      h+='<div class="wallet-accordion">'+
-        '<div class="wallet-accordion-header" onclick="_toggleAccordion(this)">'+
-        '<span class="wallet-token-icon" style="background:#e8b661;color:#0b0d10">IMD</span>'+
-        '<span>IMD</span>'+
-        '<span class="arrow" style="margin-left:auto">\u25b6</span>'+
-        '<span class="amount">'+_wf(j.imd.total)+' IMD</span>'+
-        '<span class="usd">$'+_wfu(j.imd.totalUsd)+'</span>'+
-        '</div><div class="wallet-accordion-body">';
-      j.imd.chains.filter(function(c){return c.name==='Ethereum';}).forEach(function(c){
-        h+='<div class="wallet-chain-row">'+
-          '<span class="chain-icon" style="background:'+c.color+';color:#fff">'+c.initials+'</span>'+
-          '<span>'+c.name+(c.error?' <span style="color:#f87171;font-size:0.7rem">\u26a0</span>':'')+'</span>'+
-          '<span class="amount">'+_wf(c.balance)+' '+_we(c.symbol)+'</span>'+
-          '</div>';
-      });
-      h+='</div></div>';
-    }
-    // USD/USDC accordion removed (2026-09-19): nothing on this platform pays
-    // in dollars any more (the USDC base toggle went the same way today).
-    // Watched tokens from /tokens — balance + USD price + per-chain breakdown
-    if (j.tokens && j.tokens.length) {
-      h+='<div class="wallet-accordion open">';
-      h+='<div class="wallet-accordion-header" onclick="_toggleAccordion(this)">';
-      h+='<span class="wallet-token-icon" style="background:#4ade80;color:#0b0d10">&Sigma;</span>';
-      h+='<span>Tokens</span>';
-      h+='<span class="arrow" style="margin-left:auto">\u25b6</span>';
-      h+='<span class="amount">$'+_wfu(j.tokens.reduce(function(s,t){return s+(t.balanceUsd||0);},0))+'</span>';
-      h+='</div><div class="wallet-accordion-body">';
-      j.tokens.forEach(function(t){
-        var chainColor = { 'Ethereum':'#627eea', 'Base':'#0052FF', 'Robinhood Chain':'#00D54B' }[t.chainName] || '#444';
-        var iconUrl = '/api/icon/token/' + encodeURIComponent(t.chain || 'ethereum') + '/' + t.address + '?s=' + encodeURIComponent(t.symbol || '');
-        var pl = t.unrealizedPlUsd != null
-          ? ' <span style="color:'+(t.unrealizedPlUsd >= 0 ? '#4ade80' : '#f87171')+';font-size:0.7rem">P/L '+(t.unrealizedPlUsd >= 0 ? '+' : '')+'$'+_wfu(Math.abs(t.unrealizedPlUsd))+'</span>'
-          : '';
-        var price = t.priceUsd != null ? '<span class="usd">@ $'+(t.priceUsd < 0.01 ? t.priceUsd.toPrecision(4) : _wfu(t.priceUsd))+'</span>' : '';
-        h+='<div class="wallet-chain-row">';
-        h+='<img class="wallet-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px">';
-        h+='<span>'+_we(t.symbol || 'Unknown')+(t.positionError ? ' \u26a0' : '')+'</span>';
-        h+='<span class="amount">'+_wf(t.balance)+'</span>';
-        h+='<span class="usd">$'+_wfu(t.balanceUsd)+'</span>' + price + pl;
-        h+='</div>';
-      });
-      h+='</div></div>';
-    }
     h+='<div class="wallet-total-row"><span>Total</span><span class="amount">$'+_wfu(j.totalUsd)+'</span></div>';
     var ht=document.getElementById('walletHeaderTotal');
     if(ht) ht.textContent='$'+_wfu(j.totalUsd);
@@ -140,6 +115,13 @@ async function openWallet() {
     // Append the smart-wallet transfer section (two cards, owner left / SCW right)
     loadSmartWalletSection();
   }catch(e){c.innerHTML='<div class="wallet-loading">'+_we(e.message)+'</div>';}
+}
+// Fill the SCW balance cells in the flat wallet rows once the smart-wallet
+// status has loaded (openWallet renders the list before the SCW read lands).
+function _swFillScwCells(){
+  var s=window._swState; if(!s||!s.scw)return;
+  var e=document.getElementById('scwBalEth'); if(e)e.textContent=_wf(s.scw.eth);
+  var i=document.getElementById('scwBalImd'); if(i&&s.scw.imd!=null)i.textContent=_wf(s.scw.imd);
 }
 
 // ── Smart-wallet transfer section ──────────────────────────────────────────
@@ -158,7 +140,9 @@ async function loadSmartWalletSection(){
     var r=await fetch(qs); var j=await r.json();
     if(!j.ok){host.innerHTML='<div class="wallet-loading">'+_we(j.error||'unavailable')+'</div>';return;}
     _swState=j;
+    window._swState=j;
     renderSmartWalletSection();
+    _swFillScwCells();
   }catch(e){host.innerHTML='<div class="wallet-loading">'+_we(e.message)+'</div>';}
 }
 function _swAddr(a){return a? a.slice(0,6)+'\u2026'+a.slice(-4) : '\u2014';}
@@ -230,6 +214,19 @@ function renderSmartWalletSection(){
       h2+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMaxV2()" title="Fill the full balance — a direct sweep takes no gas from the wallet, so 100% goes out">MAX</button><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('eth')" + '">\u2190 Move out</button></div>';
       h2+=swHintRow('swOutEthHint');
       h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Sweep = sign in your wallet; 100% of the balance can go \u2014 your EOA pays the tx gas from outside, the smart wallet sends everything.</div>';
+    }
+    // IMD row — move IN (browser EOA signs the transfer) and move OUT (the
+    // direct-execute sweep carries the ERC-20 transfer inside execute()).
+    var imdSym2=s.imdSymbol||'IMD';
+    var hasImd2=s.imdToken!=null;
+    if(hasImd2){
+      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym2)+'</span><span>'+_we(imdSym2)+'</span><span class="amount">'+bal(scw&&scw.imd)+'</span>'+(scw&&scw.imd!=null&&imdUsd2>0?('<span class="usd">$'+_wfu(scw.imd*imdUsd2)+'</span>'):'')+'</div>';
+      if(browserWallet2){
+        h2+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
+        h2+=swHintRow('swInImdHint');
+        h2+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swOutImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('imd')" + '">\u2190 Move out</button></div>';
+        h2+=swHintRow('swOutImdHint');
+      }
     }
     h2+='<div class="sw-status" id="swStatus"></div>';
     h2+='<div style="margin-top:0.6rem">';
@@ -619,7 +616,7 @@ async function swMoveOutBrowser(asset){
   if(!window.ethereum||!_wcAddress){_swStatus('connect your wallet first',false,true);return;}
   _swStatus('preparing the sweep…',true);
   try{
-    var r=await fetch('/api/smart-wallet/move-out-v2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,asset:asset,amount:amount,from:_wcAddress})});
+    var r=await fetch('/api/smart-wallet/move-out-v2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,asset:asset,amount:amount,from:_wcAddress,tokenAddress:asset==='imd'?(_swState.imdToken||null):null,tokenDecimals:asset==='imd'?18:null})});
     var j=await r.json();
     if(!j.ok)throw new Error(j.error||'sweep quote failed');
     if(j.directExecute&&j.to&&j.data){

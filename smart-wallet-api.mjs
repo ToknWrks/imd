@@ -358,21 +358,28 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
     const ownerEoa = getAddress(rec.ownerEoa);
     const pub = await publicClientFor(chainKey);
     const dep = getChain(chainKey);
-    // Destructuring must match the promise order: [scw-eth, scw-code, scd-usd, owner-eth, owner-usd, price]
-    const [scwEthWei, code, dollarRaw, ownerEthWei, ownerUsdRaw, ethUsdPrice] = await Promise.all([
+    // Destructuring must match the promise order: [scw-eth, scw-code, scd-usd, scw-imd, owner-eth, owner-usd, owner-imd, price]
+    const [scwEthWei, code, dollarRaw, imdRaw, ownerEthWei, ownerUsdRaw, ownerImdRaw, ethUsdPrice] = await Promise.all([
       pub.getBalance({ address: scwAddress }).catch(() => 0n),
       pub.getCode({ address: scwAddress }).catch(() => "0x"),
       getErc20Balance(dep.dollar, scwAddress, chainKey).catch(() => null),
+      dep.imdToken ? getErc20Balance(dep.imdToken, scwAddress, chainKey).catch(() => null) : Promise.resolve(null),
       pub.getBalance({ address: ownerEoa }).catch(() => 0n),
       getErc20Balance(dep.dollar, ownerEoa, chainKey).catch(() => null),
+      dep.imdToken ? getErc20Balance(dep.imdToken, ownerEoa, chainKey).catch(() => null) : Promise.resolve(null),
       getEthUsdPriceFor(chainKey).catch(() => 0),
     ]);
+    // USD spot for the IMD display hints (ETH/IMD pool × ETH/USD).
+    const imdPerEth2 = dep.imdToken ? await getImdPerEth(chainKey).catch(() => 0) : 0;
+    const imdUsd2 = imdPerEth2 > 0 ? ethUsdPrice / imdPerEth2 : 0;
     return {
       ok: true,
       chain: chainKey,
       schema: 2,
       custodyLabel: "your EOA owns it",
       ethUsd: ethUsdPrice,
+      imdPerEth: imdPerEth2,
+      imdSymbol: getChain(chainKey).imdSymbol || "IMD",
       grantStatus: rec.grantStatus || "none",
       ownerEoa,
       hasSessionKey: Boolean(rec.sessionKeyEnc),
@@ -381,13 +388,14 @@ export async function smartWalletStatus(chainKey = "ethereum", { sessionAddress:
         eth: Number(ownerEthWei) / 1e18,
         usd: ownerUsdRaw != null ? Number(ownerUsdRaw) / 10 ** (dep.dollarDecimals ?? 6) : null,
         dollarDecimals: dep.dollarDecimals ?? 6,
-        imd: null,
+        imd: imdRaw != null || ownerImdRaw != null ? Number(ownerImdRaw ?? 0n) / 1e18 : null,
       },
       scw: {
         address: scwAddress,
         eth: Number(scwEthWei) / 1e18,
         activated: Boolean(code && code !== "0x"),
         usd: dollarRaw != null ? Number(dollarRaw) / 10 ** (dep.dollarDecimals ?? 6) : null,
+        imd: imdRaw != null ? Number(imdRaw) / 1e18 : null,
       },
       gasReserveEth: Number(gasReserveWei(chainKey)) / 1e18,
       dollarSymbol: dollarSymbol(chainKey),
@@ -781,8 +789,9 @@ export async function confirmGrant(userId, chainKey = "ethereum") {
 //   - Same shape carries ERC-20 calldata (WETH transfer verified live).
 
 /** Build the direct-sweep payload: { to: scwAddress, data: execute(...) } for
- *  the browser to sign as a PLAIN tx (eth_sendTransaction). No UO, no digest. */
-export async function quoteDirectSweepV2(userId, chainKey = "ethereum", { asset = "eth", amount = 0, browserFrom = null } = {}) {
+ *  the browser to sign as a PLAIN tx (eth_sendTransaction). No UO, no digest.
+ *  asset: "eth" | "imd" | "usd" | "erc20" (with tokenAddress + tokenDecimals). */
+export async function quoteDirectSweepV2(userId, chainKey = "ethereum", { asset = "eth", amount = 0, browserFrom = null, tokenAddress = null, tokenDecimals = null } = {}) {
   const rec = getWalletRecord(userId);
   if (!rec || !isV2Record(rec)) throw new Error("no v2 record");
   const ownerEoa = getAddress(rec.ownerEoa);
@@ -807,9 +816,21 @@ export async function quoteDirectSweepV2(userId, chainKey = "ethereum", { asset 
     const value = parseUnits(String(amt), 18) >= ethWei ? ethWei : parseUnits(String(amt), 18);
     data = encodeFunctionData({ abi: executeAbi, functionName: "execute", args: [ownerEoa, value, "0x"] });
   } else {
-    const token = asset === "imd" ? dep.imdToken : dep.dollar;
-    if (!token) throw new Error(`no ${asset} token configured on ${chainKey}`);
-    const decimals = asset === "imd" ? (dep.imdDecimals ?? 18) : (dep.dollarDecimals ?? 6);
+    // Token sweep. "imd"/"usd" map to the chain's configured tokens; "erc20"
+    // sweeps ANY token address (the move-out box for tokens bought elsewhere —
+    // launchpad/curve buys land in the EOA, app trades in the SCW, and the
+    // owner can always recover anything by direct-execute sweep).
+    let token, decimals;
+    if (asset === "imd") {
+      token = dep.imdToken; decimals = dep.imdDecimals ?? 18;
+      if (!token) throw new Error("no IMD token configured on " + chainKey);
+    } else if (asset === "usd") {
+      token = dep.dollar; decimals = dep.dollarDecimals ?? 6;
+    } else {
+      token = tokenAddress;
+      decimals = tokenDecimals != null ? Number(tokenDecimals) : 18;
+    }
+    if (!token || !/^0x[0-9a-fA-F]{40}$/.test(token)) throw new Error("invalid token address");
     const inner = encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ownerEoa, parseUnits(String(amt), decimals)] });
     data = encodeFunctionData({ abi: executeAbi, functionName: "execute", args: [getAddress(token), 0n, inner] });
   }
