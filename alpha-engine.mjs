@@ -355,6 +355,9 @@ class AlphaEngine {
     alpha.sort((x, y) => Number(y.score || 0) - Number(x.score || 0) || Number(y.quoteVolume || 0) - Number(x.quoteVolume || 0));
     this.data.alpha = alpha.slice(0, MAX_QUEUE);
     this.data.updatedAt = new Date().toISOString();
+    // Persist every roster address into the wallet-scan registry (add-only;
+    // file survives restarts and queue churn — held tokens must stay visible).
+    import("./alpha-tokens.mjs").then((m) => m.recordAlphaTokens(this.data.alpha)).catch(() => {});
   }
 
   async syncSecurity() {

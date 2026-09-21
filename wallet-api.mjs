@@ -148,6 +148,53 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
     }
     const tokensUsd = tokens.reduce((s, t) => s + (t.balanceUsd ?? 0), 0);
 
+    // Alpha-list scan (2026-09-21 UX): every launchpad token in the registry
+    // file is balance-checked across the user's wallets via Multicall3 —
+    // holdings display in the wallet without the user adding a watcher.
+    // Registry + decimals persist in data/alpha-tokens.json (add-only).
+    let alphaRows = [];
+    try {
+      const alpha = await import("./alpha-tokens.mjs");
+      const wArr = userId ? await resolveUserReadWalletsSafe(userId) : [];
+      if (wArr.length) {
+        await alpha.fillAlphaDecimals("ethereum").catch(() => {});
+        const bal = await alpha.scanAlphaBalances(wArr, "ethereum");
+        const ethUsdP = await getEthUsdPriceFor("ethereum").catch(() => 0);
+        const watched = new Set(tokens.map((t) => t.address.toLowerCase()));
+        alphaRows = [...bal.entries()]
+          .map(([addr, per]) => {
+            const totalRaw = per.reduce((s, r) => s + (r ?? 0n), 0n);
+            if (totalRaw === 0n) return null;   // only tokens the wallet HOLDS
+            const reg = alpha.getAlphaTokens().find((t) => t.address.toLowerCase() === addr);
+            const decimals = reg?.decimals ?? 18;
+            const fmt = Number(totalRaw) / 10 ** decimals;
+            return {
+              symbol: reg?.symbol || null,
+              address: addr,
+              chain: "ethereum",
+              chainName: getChain("ethereum").name,
+              balance: fmt,
+              balanceUsd: null,           // curve tokens price via the indexer; skip USD rather than lie
+              priceUsd: null,
+              costBasisUsd: null,
+              unrealizedPlUsd: null,
+              positionError: null,
+              decimals,
+              ownerBalance: per[ownerIdxOf(wArr, userId)] != null ? Number(per[ownerIdxOf(wArr, userId)]) / 10 ** decimals : null,
+              scwBalance: per[0] != null ? Number(per[0]) / 10 ** decimals : null,
+              alphaToken: true,
+            };
+          })
+          .filter(Boolean);
+      }
+    } catch (e) {
+      console.error(`[wallet-api] alpha scan failed (non-fatal): ${String(e.message || e).slice(0, 80)}`);
+    }
+    // Dedupe: a watched alpha token keeps its richer watched row (P/L etc.);
+    // pure-alpha rows (unwatched) append after the watched rows.
+    const watchedAddrs = new Set(tokens.map((t) => t.address.toLowerCase()));
+    const alphaOnly = alphaRows.filter((t) => !watchedAddrs.has(t.address.toLowerCase()));
+
     // IMD price for the slideout header/row display (ETH/IMD pool × ETH/USD).
     const imdPerEth = await getImdPerEth("ethereum").catch(() => 0);
     const imdUsd = imdPerEth > 0 ? (await getEthUsdPriceFor("ethereum").catch(() => 0)) / imdPerEth : 0;
@@ -178,7 +225,7 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
       eth: { total: ethTotal, totalUsd: ethTotalUsd, chains: ethChains },
       usd: { totalUsd: usdTotalUsd, symbol: usdChains.some(c => c.symbol === "USDG") ? "USD" : "USDC", chains: usdChains },
       imd: imdChains.length ? { total: imdTotal, totalUsd: imdTotal * imdUsd, perEth: imdPerEth, chains: imdChains, ownerBalance: imdOwner, scwBalance: imdScw } : null,
-      tokens,
+      tokens: [...tokens, ...alphaOnly],   // watched rows + unwatched alpha holdings
       totalUsd: ethTotalUsd + usdTotalUsd + tokensUsd,
     });
   } catch (e) {
@@ -188,3 +235,15 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
 
 // lazy import to avoid a cycle at module init (signer.mjs pulls chains)
 import { resolveSigner } from "./signer.mjs";
+
+/** resolveUserReadWallets with a safe fallback — alpha scan is best-effort. */
+async function resolveUserReadWalletsSafe(userId) {
+  try {
+    const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+    return await resolveUserReadWallets(userId, "ethereum");
+  } catch { return []; }
+}
+function ownerIdxOf(wallets, userId) {
+  const i = wallets.findIndex((a) => a.toLowerCase() === String(userId).toLowerCase());
+  return i >= 0 ? i : 0;
+}
