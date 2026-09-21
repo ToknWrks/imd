@@ -72,42 +72,11 @@ async function openWallet() {
   try {
     var r=await fetch('/api/wallet'), j=await r.json();
     if(!j.ok){c.innerHTML='<div class="wallet-loading">'+_we(j.error||'unavailable')+'</div>';return;}
+    window._walletData=j;
     var h='';
-    // FLAT WALLET LIST (2026-09-20): no accordions — every asset is one row,
-    // with the owner and SCW balances side by side. Moving funds in/out lives
-    // in the smart-wallet section below (which owns the only move inputs).
-    var rowAsset=function(icon,label,ownerBal,scwBal,usdVal,extra,scwId){
-      return '<div class="wallet-chain-row">'+
-        (icon)+
-        '<span>'+label+'</span>'+
-        '<span class="amount" title="owner wallet">'+_wf(ownerBal)+'</span>'+
-        '<span class="amount" style="opacity:0.75" title="smart wallet"'+(scwId?(' id="'+scwId+'"'):'')+'>'+_wf(scwBal)+'</span>'+
-        '<span class="usd">'+(usdVal!=null?('$'+_wfu(usdVal)):'')+'</span>'+
-        (extra||'')+
-        '</div>';
-    };
-    var ethIcon='<span class="wallet-token-icon" style="background:#627eea;color:#fff">&Xi;</span>';
-    h+=rowAsset(ethIcon,'ETH',j.eth.total,'\u2014',j.eth.totalUsd,null,'scwBalEth');
-    // IMD row (the platform/launchpad token) — both wallets, like ETH.
-    if (j.imd) {
-      h+=rowAsset('<span class="wallet-token-icon" style="background:#e8b661;color:#0b0d10">IMD</span>',j.imdSymbol||'IMD',j.imd.total,'\u2014',j.imd.totalUsd,null,'scwBalImd');
-    }
-    // Watched tokens — combined balance (SCW + EOA summed upstream) with USD
-    // value and P/L. Balance source note: these rows already sum both wallets.
-    (j.tokens||[]).forEach(function(t){
-      var iconUrl='/api/icon/token/'+encodeURIComponent(t.chain||'ethereum')+'/'+t.address+'?s='+encodeURIComponent(t.symbol||'');
-      var pl = t.unrealizedPlUsd != null
-        ? ' <span style="color:'+(t.unrealizedPlUsd >= 0 ? '#4ade80' : '#f87171')+';font-size:0.7rem">P/L '+(t.unrealizedPlUsd >= 0 ? '+' : '')+'$'+_wfu(Math.abs(t.unrealizedPlUsd))+'</span>'
-        : '';
-      var price = t.priceUsd != null ? '<span class="usd">@ $'+(t.priceUsd < 0.01 ? t.priceUsd.toPrecision(4) : _wfu(t.priceUsd))+'</span>' : '';
-      h+='<div class="wallet-chain-row">'+
-        '<img class="wallet-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px">'+
-        '<span>'+_we(t.symbol||'Unknown')+(t.positionError?' \u26a0':'')+'</span>'+
-        '<span class="amount">'+_wf(t.balance)+'</span>'+
-        '<span class="amount" style="opacity:0.35">\u2014</span>'+
-        '<span class="usd">$'+_wfu(t.balanceUsd)+'</span>'+price+pl+
-        '</div>';
-    });
+    // FLAT STRUCTURE (2026-09-20): the asset rows live INSIDE the two
+    // smart-wallet cards (owner card = balances + Fund; SCW card = balances
+    // + MAX + Move out). Nothing renders between the cards and the total.
     h+='<div class="wallet-total-row"><span>Total</span><span class="amount">$'+_wfu(j.totalUsd)+'</span></div>';
     var ht=document.getElementById('walletHeaderTotal');
     if(ht) ht.textContent='$'+_wfu(j.totalUsd);
@@ -198,10 +167,38 @@ function renderSmartWalletSection(){
     // Connected wallet card (owner)
     h2+='<div class="sw-card"><div class="sw-card-title">Your wallet <span class="hint">owner</span></div>';
     h2+=_swAddrRow(_wcAddress||owner.address);
+    // ETH row
     h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(owner.eth)+'</span>'+usd(owner.eth!=null?owner.eth*ethUsd2:null)+'</div>';
     if(browserWallet2){
       h2+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
       h2+=swHintRow('swInEthHint');
+    }
+    // Token rows (2026-09-20): EVERY token the user holds renders here with
+    // its own Fund box — IMD first (platform token), then watched tokens.
+    // Data: ownerBalance/scwBalance per token from /api/wallet (per-wallet
+    // split), falling back to the combined balance on the owner card only.
+    var jw=window._walletData||null;
+    var imdTok=(_swState&&_swState.imdToken)||null;
+    var imdRows=(jw&&jw.tokens||[]).filter(function(t){return imdTok&&t.address&&t.address.toLowerCase()===String(imdTok).toLowerCase();});
+    var otherRows=(jw&&jw.tokens||[]).filter(function(t){return !imdTok||!t.address||t.address.toLowerCase()!==String(imdTok).toLowerCase();});
+    var ownerTokenRow=function(t){
+      var disp=t.ownerBalance!=null?t.ownerBalance:t.balance;
+      var iconUrl='/api/icon/token/'+encodeURIComponent(t.chain||'ethereum')+'/'+t.address+'?s='+encodeURIComponent(t.symbol||'');
+      var usd2=t.priceUsd!=null&&disp!=null?disp*t.priceUsd:null;
+      return '<div class="sw-asset"><img class="sw-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px"><span>'+_we(t.symbol||'?')+'</span><span class="amount">'+bal(disp)+'</span>'+usd(usd2)+'</div>'+
+        (browserWallet2?('<div class="sw-move-row"><input id="swInTok'+t.address.slice(0,8)+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn" onclick="swMoveTokenIn(\''+t.address+'\',\''+(t.decimals!=null?t.decimals:18)+'\')">Fund \u2192</button></div>'):'');
+    };
+    if(j.imd&&!imdRows.length){
+      // IMD configured but not watched — still show it with its own Fund box.
+      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(s.imdSymbol||'IMD')+'</span><span>'+_we(s.imdSymbol||'IMD')+'</span><span class="amount">'+bal(j.imd.total)+'</span>'+(j.imd.totalUsd!=null?('<span class="usd">$'+_wfu(j.imd.totalUsd)+'</span>'):'')+'</div>';
+      if(browserWallet2){
+        h2+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
+        h2+=swHintRow('swInImdHint');
+      }
+    }
+    imdRows.forEach(function(t){ h2+=ownerTokenRow(t); });
+    otherRows.forEach(function(t){ h2+=ownerTokenRow(t); });
+    if(browserWallet2){
       h2+='<div class="hint" style="margin-top:0.4rem;font-size:0.68rem">Funding signs in your browser wallet \u2014 keys never leave it.</div>';
     }
     h2+='</div>';
@@ -215,19 +212,31 @@ function renderSmartWalletSection(){
       h2+=swHintRow('swOutEthHint');
       h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Sweep = sign in your wallet; 100% of the balance can go \u2014 your EOA pays the tx gas from outside, the smart wallet sends everything.</div>';
     }
-    // IMD row — move IN (browser EOA signs the transfer) and move OUT (the
-    // direct-execute sweep carries the ERC-20 transfer inside execute()).
-    var imdSym2=s.imdSymbol||'IMD';
-    var hasImd2=s.imdToken!=null;
-    if(hasImd2){
-      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym2)+'</span><span>'+_we(imdSym2)+'</span><span class="amount">'+bal(scw&&scw.imd)+'</span>'+(scw&&scw.imd!=null&&imdUsd2>0?('<span class="usd">$'+_wfu(scw.imd*imdUsd2)+'</span>'):'')+'</div>';
-      if(browserWallet2){
-        h2+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
-        h2+=swHintRow('swInImdHint');
-        h2+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swOutImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('imd')" + '">\u2190 Move out</button></div>';
+    // Token rows: every held token with display + MAX + Move out (direct
+    // sweep). IMD uses the configured token address; watched tokens carry
+    // their own. Data: scwBalance from /api/wallet's per-wallet split.
+    var jw2=window._walletData||null;
+    var imdTok2=(_swState&&_swState.imdToken)||null;
+    var imdRows2=(jw2&&jw2.tokens||[]).filter(function(t){return imdTok2&&t.address&&t.address.toLowerCase()===String(imdTok2).toLowerCase();});
+    var otherRows2=(jw2&&jw2.tokens||[]).filter(function(t){return !imdTok2||!t.address||t.address.toLowerCase()!==String(imdTok2).toLowerCase();});
+    var scwTokenRow=function(t){
+      var disp=t.scwBalance!=null?t.scwBalance:null;
+      var iconUrl='/api/icon/token/'+encodeURIComponent(t.chain||'ethereum')+'/'+t.address+'?s='+encodeURIComponent(t.symbol||'');
+      var usd2=t.priceUsd!=null&&disp!=null?disp*t.priceUsd:null;
+      var idSuffix=t.address.slice(0,8);
+      return '<div class="sw-asset"><img class="sw-token-icon" src="'+iconUrl+'" alt="" width="18" height="18" style="border-radius:3px"><span>'+_we(t.symbol||'?')+'</span><span class="amount">'+bal(disp)+'</span>'+usd(usd2)+'</div>'+
+        (browserWallet2&&disp!=null?('<div class="sw-move-row"><input id="swOutTok'+idSuffix+'" type="number" step="any" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillMaxToken(\''+t.address+'\',\''+(t.decimals!=null?t.decimals:18)+'\')">MAX</button><button class="sw-btn alt" onclick="swMoveTokenOut(\''+t.address+'\',\''+(t.decimals!=null?t.decimals:18)+'\')">\u2190 Move out</button></div>'):'');
+    };
+    if(!imdRows2.length&&s.imdToken!=null){
+      // IMD configured but not watched — show its own display + Move out.
+      h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(s.imdSymbol||'IMD')+'</span><span>'+_we(s.imdSymbol||'IMD')+'</span><span class="amount">'+bal(scw&&scw.imd)+'</span>'+(scw&&scw.imd!=null&&imdUsd2>0?('<span class="usd">$'+_wfu(scw.imd*imdUsd2)+'</span>'):'')+'</div>';
+      if(browserWallet2&&scw&&scw.imd!=null){
+        h2+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swOutImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMaxImd()" title="Fill the full balance">MAX</button><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('imd')" + '">\u2190 Move out</button></div>';
         h2+=swHintRow('swOutImdHint');
       }
     }
+    imdRows2.forEach(function(t){ h2+=scwTokenRow(t); });
+    otherRows2.forEach(function(t){ h2+=scwTokenRow(t); });
     h2+='<div class="sw-status" id="swStatus"></div>';
     h2+='<div style="margin-top:0.6rem">';
     if(!activated2){h2+='<button class="sw-btn activate" onclick="swActivateV2()">Activate smart wallet</button>';}
@@ -453,6 +462,77 @@ function swFillMaxV2() {
   const b = _swState.scw && _swState.scw.eth;
   if (b > 0) { inp.value = b.toFixed(6); _swStatus('full balance \u2014 a direct sweep sends 100% (your EOA pays the tx gas)'); }
   else _swStatus('no ETH to move');
+}
+// MAX for a token row on the SCW card: the token's full SCW balance.
+function swFillMaxToken(tokenAddress, decimals) {
+  const jw = window._walletData;
+  const t = jw && (jw.tokens || []).find((x) => x.address && x.address.toLowerCase() === String(tokenAddress).toLowerCase());
+  const inp = document.getElementById('swOutTok' + String(tokenAddress).slice(0, 8));
+  if (!inp) return;
+  const v = t && t.scwBalance != null ? t.scwBalance : null;
+  if (v != null && v > 0) { inp.value = v; _swStatus('full smart-wallet balance of ' + (t.symbol || 'token')); }
+  else _swStatus('no smart-wallet balance of ' + (t && t.symbol || 'this token'));
+}
+// MAX for the IMD row (configured-but-unwatched path).
+function swFillMaxImd() {
+  const inp = document.getElementById('swOutImd');
+  if (!inp || !_swState) return;
+  const b = _swState.scw && _swState.scw.imd;
+  if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet IMD balance'); }
+  else _swStatus('no smart-wallet IMD balance');
+}
+// Fund (move in) an arbitrary token: browser EOA signs the ERC-20 transfer.
+function swMoveTokenIn(tokenAddress, decimals) {
+  const inp = document.getElementById('swInTok' + String(tokenAddress).slice(0, 8));
+  if (!inp) return;
+  const amount = parseFloat(inp.value);
+  if (!(amount > 0)) { _swStatus('enter an amount', false, true); return; }
+  return _swMoveTokenTransfer(tokenAddress, Number(decimals) || 18, amount, 'in');
+}
+// Move out an arbitrary token from the SCW: owner-signed direct sweep.
+function swMoveTokenOut(tokenAddress, decimals) {
+  const inp = document.getElementById('swOutTok' + String(tokenAddress).slice(0, 8));
+  if (!inp) return;
+  const amount = parseFloat(inp.value);
+  if (!(amount > 0)) { _swStatus('enter an amount', false, true); return; }
+  return _swMoveTokenSweep(tokenAddress, Number(decimals) || 18, amount);
+}
+async function _swMoveTokenTransfer(tokenAddress, decimals, amount) {
+  if (!window.ethereum || !_wcAddress) { _swStatus('connect your wallet first', false, true); return; }
+  const scwAddr = _swState && _swState.scw && _swState.scw.address;
+  if (!scwAddr) { _swStatus('smart wallet not ready', false, true); return; }
+  _swStatus('signing in your wallet…', true);
+  try {
+    const accts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    const from = accts && accts[0];
+    if (!from) { _swStatus('no account active in your wallet', false, true); return; }
+    const txParams = fundingTxParams({ from, scwAddress: scwAddr, asset: 'erc20', amount, chain: _swState.chain, tokenAddress, tokenDecimals: decimals });
+    const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [txParams] });
+    _swStatus('\u2713 sent \u2014 tx ' + (txHash || '').slice(0, 10) + '… reloading…');
+    setTimeout(function(){ openWallet(); }, 2200);
+  } catch (e) {
+    if (e && e.code === 4001) { _swStatus('rejected in wallet', false, true); return; }
+    _swStatus(String(e.message || e).slice(0, 160), false, true);
+  }
+}
+function _swMoveTokenSweep(tokenAddress, decimals, amount) {
+  if (!window.ethereum || !_wcAddress) { _swStatus('connect your wallet first', false, true); return; }
+  _swStatus('preparing the sweep…', true);
+  return (async () => {
+    try {
+      const r = await fetch('/api/smart-wallet/move-out-v2', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chain: _swState.chain, asset: 'erc20', amount, from: _wcAddress, tokenAddress, tokenDecimals: decimals }) });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'sweep quote failed');
+      if (!(j.directExecute && j.to && j.data)) throw new Error('unexpected sweep payload');
+      _swStatus('signing in your wallet (single step)…', true);
+      const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [{ from: _wcAddress, to: j.to, data: j.data, chainId: chainIdHexFor(_swState.chain), gas: '0x' + Number(200000).toString(16) }] });
+      _swStatus('\u2713 sent \u2014 sweep tx ' + (txHash || '').slice(0, 10) + '… reloading…');
+      setTimeout(function(){ openWallet(); }, 2200);
+    } catch (e) {
+      if (e && e.code === 4001) { _swStatus('rejected in wallet', false, true); return; }
+      _swStatus(String(e.message || e).slice(0, 160), false, true);
+    }
+  })();
 }
 function _swStatus(msg,busy,err){
   var el=document.getElementById('swStatus'); if(!el)return;

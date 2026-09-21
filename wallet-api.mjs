@@ -126,7 +126,26 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
         costBasisUsd: w.cost_basis_usd != null ? Number(w.cost_basis_usd) : null,
         unrealizedPlUsd: w.unrealized_pl_usd != null ? Number(w.unrealized_pl_usd) : null,
         positionError: w.position_error || null,
+        decimals: w.decimals ?? 18,
       }));
+    // Per-wallet split (2026-09-20): owner (browser EOA) vs SCW balance for
+    // each watched token — the slideout's two cards each carry their own
+    // fund/move-out box, so they need the split, not just the summed snapshot.
+    if (userId) {
+      try {
+        const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
+        const walletsArr = await resolveUserReadWallets(userId, "ethereum").catch(() => []);
+        if (walletsArr.length) {
+          const ownerIdx = Math.max(0, walletsArr.findIndex((a) => a.toLowerCase() === String(userId).toLowerCase()));
+          await Promise.all(tokens.map(async (t) => {
+            const raws = await Promise.all(walletsArr.map((w) => getErc20Balance(t.address, w, t.chain).catch(() => null)));
+            const fmt = (r) => (r != null ? Number(r) / 10 ** t.decimals : null);
+            t.scwBalance = raws.length > 1 ? fmt(raws[0]) : null;   // walletsArr[0] = SCW
+            t.ownerBalance = fmt(raws[ownerIdx]);
+          }));
+        }
+      } catch { /* split is optional — combined balance still renders */ }
+    }
     const tokensUsd = tokens.reduce((s, t) => s + (t.balanceUsd ?? 0), 0);
 
     // IMD price for the slideout header/row display (ETH/IMD pool × ETH/USD).
