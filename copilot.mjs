@@ -118,7 +118,21 @@ setInterval(() => {
 // ── Request lifecycle ────────────────────────────────────────────────────────
 
 export function listPending() {
-  return db.prepare(`SELECT * FROM copilot_requests WHERE status = 'pending' ORDER BY created_at ASC`).all();
+  // Normalized shape (2026-09-20): map DB columns to the SAME field names the
+  // SSE 'request' event uses (to/value/expiresAt). The pending-restore path
+  // (page reload with requests still waiting) fed raw rows to cpApprove,
+  // which read req.to === undefined → the wallet threw
+  // "Cannot read properties of undefined (reading 'toLowerCase')".
+  return db.prepare(`SELECT * FROM copilot_requests WHERE status = 'pending' ORDER BY created_at ASC`).all()
+    .map((r) => ({
+      ...r,
+      to: r.to_address,
+      value: r.value_wei ?? "0",
+      // created_at is a UTC SQLite timestamp; convert to epoch ms for the
+      // countdown. Original timeout = COPILOT_TIMEOUT_MS (same window the
+      // live request got) applied on top of created_at.
+      expiresAt: Date.parse(r.created_at + "Z") + copilotTimeoutMs(),
+    }));
 }
 
 export function listRecent(limit = 30) {

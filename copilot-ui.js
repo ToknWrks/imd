@@ -19,7 +19,13 @@ export const COPILOT_BADGE = `
 .copilot-badge { background:rgba(232,182,97,0.15); border-color:rgba(232,182,97,0.5); color:#e8b661; }
 .copilot-badge.has-pending { animation: copilotPulse 1.2s ease-in-out infinite; }
 @keyframes copilotPulse { 0%,100% { opacity:1 } 50% { opacity:0.55 } }
-#cpModalBackdrop { position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:9998; display:none; align-items:center; justify-content:center; }
+/* Native <dialog> (2026-09-20): the exit modal on /tokens is a <dialog>
+   opened via showModal() — those render in the browser's TOP LAYER, above
+   any z-index, so a fixed-position approval div was always hidden behind
+   it. As a dialog, the approval opens after and stacks above it. */
+dialog#cpModalBackdrop { background:transparent; border:none; padding:0; max-width:none; width:auto; height:auto; display:none; align-items:center; justify-content:center; }
+dialog#cpModalBackdrop[open] { display:flex; }
+dialog#cpModalBackdrop::backdrop { background:rgba(0,0,0,0.65); }
 #cpModal { background:#16181d; border:1px solid rgba(232,182,97,0.4); border-radius:10px; max-width:460px; width:92%; padding:1.2rem 1.3rem; color:#fafafa; font-size:0.9rem; }
 #cpModal h3 { margin:0 0 0.5rem; font-size:1rem; color:#e8b661; }
 #cpModal .cp-row { display:flex; justify-content:space-between; gap:0.8rem; padding:0.3rem 0; border-bottom:1px solid rgba(255,255,255,0.06); }
@@ -110,7 +116,10 @@ function cpRenderModal(req) {
   var kindLabel = { buy:'BUY', sell:'SELL', approve:'TOKEN APPROVAL', wrap:'WRAP ETH', other:'CALL' }[req.kind] || req.kind.toUpperCase();
   var productLabel = { dip:'Accumulate', sniper:'Sniper', mm:'Market Maker', other:'App' }[req.product] || req.product;
   var eth = req.value && req.value !== '0' ? (Number(req.value) / 1e18) : 0;
-  bd.style.display = 'flex';
+  // showModal (2026-09-20): top-layer stacking above the exit <dialog>. A
+  // dialog already open with showModal() cannot be re-shown — close it first.
+  try { if (bd.open) bd.close(); } catch {}
+  try { bd.showModal(); } catch (e) { bd.style.display = 'flex'; } // fallback if dialog unsupported
   document.getElementById('cpModal').innerHTML =
     '<h3>' + kindLabel + ' — ' + _cpE(productLabel) + (_cpE(req.symbol) ? ' · ' + _cpE(req.symbol) : '') + '</h3>' +
     '<div class="cp-row"><span>Network</span><span>' + _cpE(req.chainName || req.chain) + '</span></div>' +
@@ -141,14 +150,14 @@ function cpStartCountdown(expiresAt) {
 function cpCloseModal() {
   clearInterval(_cpTimer); _cpTimer = null; _cpCurrent = null;
   var bd = document.getElementById('cpModalBackdrop');
-  if (bd) bd.style.display = 'none';
+  if (bd) { try { bd.close(); } catch {} bd.style.display = 'none'; }
   cpUpdateBadge(); cpShowNext();
 }
 
 function cpCloseModalWithStatus(status) {
   clearInterval(_cpTimer); _cpTimer = null; _cpCurrent = null;
   var bd = document.getElementById('cpModalBackdrop');
-  if (bd) bd.style.display = 'none';
+  if (bd) { try { bd.close(); } catch {} bd.style.display = 'none'; }
   cpUpdateBadge(); cpShowNext();
   if (status) cpToast('Trade ' + status + ' — nothing signed');
 }
@@ -157,6 +166,7 @@ async function cpApprove() {
   var req = _cpCurrent;
   if (!req || _cpBusy) return;
   if (!window.ethereum) { alert('No browser wallet found — install MetaMask/Rabby or decline this request.'); return; }
+  if (!req.to || !/^0x[0-9a-fA-F]{40}$/.test(req.to)) { cpToast('Malformed sign request (missing contract) — decline it and retry the trade'); cpDecline(); return; }
   _cpBusy = true;
   var btn = document.getElementById('cpApprove');
   if (btn) { btn.disabled = true; btn.textContent = 'Signing\\u2026'; }
