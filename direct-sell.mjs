@@ -28,11 +28,18 @@ function guardUnhandledRejection() {
   process.on("unhandledRejection", () => {});
 }
 
-async function captureFirstCall(address, fn) {
+async function captureFirstCall(address, chainKey, fn) {
   guardUnhandledRejection();
   let captured = null;
   const captureSigner = {
     address: getAddress(address),
+    // Buy-side pre-flight guards (buyToken/buyCurveCoin/buyDip) read this
+    // BEFORE the first callContract — a stub here throws "getEthBalanceWei
+    // is not a function" and kills every co-pilot buy (found live 2026-09-21).
+    async getEthBalanceWei() {
+      const { publicClient } = await import("./sniper-swap.mjs");
+      return publicClient(chainKey).getBalance({ address: getAddress(address) });
+    },
     async callContract(call) { captured = call; throw new Error("CAPTURE-STOP"); },
   };
   try {
@@ -53,7 +60,7 @@ async function captureFirstCall(address, fn) {
 export async function buildDirectCurveSell({ tokenAddress, coinAmountWei, sellerAddress, slippagePct = 3, chainKey = "ethereum", curveState, imdPerEth, universalRouter }) {
   if (!curveState || !imdPerEth || !universalRouter) throw new Error("buildDirectCurveSell needs { curveState, imdPerEth, universalRouter }");
   const { sellCurveCoin } = await import("./curve-buy.mjs");
-  const built = await captureFirstCall(sellerAddress, (signer) =>
+  const built = await captureFirstCall(sellerAddress, chainKey, (signer) =>
     sellCurveCoin(signer, tokenAddress, coinAmountWei, { slippagePct, chainKey, curveState, imdPerEth, universalRouter }));
   return { ...built, value: "0", gas: 450000 };
 }
@@ -67,7 +74,7 @@ export async function buildDirectCurveSell({ tokenAddress, coinAmountWei, seller
  */
 export async function buildDirectV4Sell({ chainKey, tokenAddress, amountIn, slippagePct, pool, sellerAddress }) {
   const { executeV4Sell } = await import("./sniper-extras.mjs");
-  return captureFirstCall(sellerAddress, (signer) =>
+  return captureFirstCall(sellerAddress, chainKey, (signer) =>
     executeV4Sell({ signer, chainKey, tokenAddress, amountIn, slippagePct, pool }));
 }
 
@@ -86,7 +93,7 @@ export async function buildDirectV4Sell({ chainKey, tokenAddress, amountIn, slip
  */
 export async function buildDirectSniperSell({ chainKey, tokenAddress, amountHuman, slippagePct, pool, sellerAddress }) {
   const { executeSniperSell } = await import("./sniper-extras.mjs");
-  return captureFirstCall(sellerAddress, (signer) =>
+  return captureFirstCall(sellerAddress, chainKey, (signer) =>
     executeSniperSell({ signer, chainKey, tokenAddress, amountHuman, slippagePct, pool }));
 }
 
@@ -101,7 +108,7 @@ export async function buildDirectSniperSell({ chainKey, tokenAddress, amountHuma
 export async function buildDirectSniperBuy({ chainKey, tokenAddress, ethAmount, slippagePct, pool, buyerAddress }) {
   if (pool?.dex && pool.dex !== "CURVE") {
     const { executeSniperBuy } = await import("./sniper-swap.mjs");
-    return captureFirstCall(buyerAddress, (signer) =>
+    return captureFirstCall(buyerAddress, chainKey, (signer) =>
       executeSniperBuy({ signer, chainKey, tokenAddress, ethAmount, slippagePct, pool }));
   }
   const { buyToken } = await import("./dip-swap.mjs");
@@ -109,6 +116,6 @@ export async function buildDirectSniperBuy({ chainKey, tokenAddress, ethAmount, 
   const ethUsd = await getEthUsd(chainKey).catch(() => 0);
   if (!(ethUsd > 0)) throw new Error("ETH/USD price unavailable — cannot size the buy");
   const usdSize = parseFloat(ethAmount) * ethUsd;
-  return captureFirstCall(buyerAddress, (signer) =>
+  return captureFirstCall(buyerAddress, chainKey, (signer) =>
     buyToken(signer, tokenAddress, usdSize, { slippagePct, pool: null, chainKey }));
 }
