@@ -2161,21 +2161,14 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
   if (curveState) {
     const imdPerEth = await getImdPerEth(chainKey).catch(() => null);
     if (!imdPerEth) throw new Error("curve sell: can't price IMD (ETH/IMD pool unavailable)");
-    // LAUNCHPAD-COIN GUARD (2026-09-21): curve coins keep balances in the
-    // hook's ledger — raw ERC-20 storage can be ZERO while balanceOf shows
-    // the position. Pulling via Permit2 then panics (TRANSFER_FROM_FAILED)
-    // and burns gas. Only coins in the raw wallet map are sellable here.
-    const { probeRawErc20Balance, LAUNCHPAD_TOKEN_URL } = await import("./launchpad-token.mjs");
-    const raw = await probeRawErc20Balance(token, uid, chainKey);
-    if (raw < amountIn) {
-      const launchpad = LAUNCHPAD_TOKEN_URL(token);
-      return {
-        ok: false,
-        error: `This coin's balance lives in the launchpad's curve ledger, not the wallet's ERC-20 balance — it can't be sold through Uniswap routes (the transfer would fail). Sell it on the launchpad: ${launchpad}`,
-        launchpad,
-        curveNative: true,
-      };
-    }
+    // 2026-09-21: the LAUNCHPAD-COIN GUARD that used to gate this on a
+    // storage-slot-0 probe (probeRawErc20Balance) is removed — IMD launchpad
+    // coins are trusted (this launchpad's tokens can't be honeypots), and
+    // the probe's slot-0 assumption produced a false positive on VANGUARD
+    // (a live eth_call of this exact sellCurveCoin path simulated clean, and
+    // the wallet had already sold half its VANGUARD position externally via
+    // the launchpad for real ETH). launchpad-token.mjs's probe helpers are
+    // unused now but left in place in case a non-launchpad case needs them.
     const { buildDirectCurveSell } = await import("./direct-sell.mjs");
     const built = await buildDirectCurveSell({ tokenAddress: token, coinAmountWei: amountIn, sellerAddress: uid, slippagePct, chainKey, curveState, imdPerEth, universalRouter: dep.v4.universalRouter });
     return { directSign: { to: built.to, data: built.data, value: "0", chainId, gas: built.gas, isApproval: built.isApproval } };
