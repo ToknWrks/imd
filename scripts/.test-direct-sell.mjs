@@ -1,0 +1,11 @@
+import { getTokenMeta, getCurveCoinState, getImdPerEth } from "/Users/lancepitman/accumulate-imd/dip-swap.mjs";
+const VANGUARD = "0xe56b29e2bb32fd036f3e08bf6ee2a874b4713248";
+const meta = await getTokenMeta(VANGUARD, "ethereum");
+console.log("meta:", JSON.stringify(meta));
+const cs = await getCurveCoinState(VANGUARD, "ethereum");
+console.log("curveState:", !!cs);
+const { buildDirectCurveSell } = await import("/Users/lancepitman/accumulate-imd/direct-sell.mjs");
+const dep = (await import("/Users/lancepitman/accumulate-imd/chains.mjs")).getChain("ethereum");
+const ip = await getImdPerEth("ethereum");
+const built = await buildDirectCurveSell({ tokenAddress: VANGUARD, coinAmountWei: 1000000000000000000n, sellerAddress: "0xa71fb297aa443adfc22ff74981d8c067ec3475cb", slippagePct: 3, chainKey: "ethereum", curveState: cs, imdPerEth: ip, universalRouter: dep.v4.universalRouter });
+console.log("BUILT to:", built.to.slice(0, 12), "dataLen:", built.data.length, "value:", built.value);

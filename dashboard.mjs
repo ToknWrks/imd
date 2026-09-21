@@ -2132,7 +2132,7 @@ async function buildSellTx(watcher, amountHuman, slippagePct) {
   const token = watcher.contract_address;
   const dep = getChain(chainKey);
   const chainId = chainKey === "base" ? 8453 : (chainKey === "robinhood" ? 4663 : 1);
-  const meta = await getTokenMeta(chainKey, token);
+  const meta = await getTokenMeta(token, chainKey);
   const amountIn = BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
 
   // Curve coin: sellCurveCoin assembles the UR payload (commands 0x060c0f).
