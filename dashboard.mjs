@@ -2127,7 +2127,7 @@ const server = createServer(async (req, res) => {
  * Curve coins route through sellCurveCoin's payload shape; AMM sells through
  * the venue-specific builders. No signer object needed — the USER signs.
  */
-async function buildSellTx(watcher, amountHuman, slippagePct) {
+async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
   const chainKey = watcher.chain || "ethereum";
   const token = watcher.contract_address;
   const dep = getChain(chainKey);
@@ -2187,7 +2187,7 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
         const u = getUser(uid);
         const mode = u?.signer_mode || "copilot";
         if (mode === "copilot") {
-          const built = await buildSellTx(watcher, amt, slippage);
+          const built = await buildSellTx(watcher, amt, slippage, uid);
           return json({
             ok: true,
             directSign: built.directSign,
