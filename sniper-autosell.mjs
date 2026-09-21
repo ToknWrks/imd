@@ -15,6 +15,7 @@ import {
 import { insertSniperTrade, getSniperTokenHistory } from "./db.mjs";
 import { getSniperPosition, getTokenBalance, executeSniperSell, waitForTxReceipt } from "./sniper-extras.mjs";
 import { resolveSigner, resolveSignerUser } from "./signer.mjs";
+import { formatUnits } from "viem";
 
 const TICK_MS = 30_000;
 let running = false;
@@ -101,11 +102,18 @@ async function tick() {
           continue;
         }
 
-        // Trigger: sell 100% of the balance. executeSniperSell now waits for the
-        // on-chain receipt and throws on revert, so a failed sell lands in the
-        // catch below as a terminal 'error' — never a false 'triggered'.
+        // Trigger: sell 100% of the balance. Full-precision string from the
+        // raw balance (2026-09-21 fix) — bal.formatted is a lossy float, and
+        // round-tripping it back to wei can overshoot the real on-chain
+        // balance on large-supply tokens, reverting the transferFrom even
+        // with a sufficient Permit2 allowance (found live on manual sniper
+        // sells; autosell shares the identical pattern). executeSniperSell
+        // now waits for the on-chain receipt and throws on revert, so a
+        // failed sell lands in the catch below as a terminal 'error' —
+        // never a false 'triggered'.
+        const amountHuman = formatUnits(BigInt(bal.raw), bal.decimals);
         const result = await executeSniperSell({
-          signer, chainKey, tokenAddress: token, amountHuman: bal.formatted, slippagePct: 3,
+          signer, chainKey, tokenAddress: token, amountHuman, slippagePct: 3,
         });
         const receipt = await waitForTxReceipt(chainKey, result.txHash);
         insertSniperTrade({
@@ -114,7 +122,7 @@ async function tick() {
           symbol: bal.symbol ?? order.symbol ?? null,
           dex: "AUTOSELL " + (result.label || result.dex),
           eth_spent: 0,
-          token_amount: bal.formatted,
+          token_amount: Number(amountHuman),
           buy_tx_hash: result.txHash,
           eth_received: result.ethReceived ?? null,
           user_id: order.user_id ?? null,

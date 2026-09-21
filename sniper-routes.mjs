@@ -19,6 +19,7 @@ import { sniperPage } from "./sniper-page.mjs";
 import { syncExternalTrades } from "./wallet-sync.mjs";
 import { probeSellDeliverability } from "./sell-probe.mjs";
 import { recordGasForTx } from "./gas-ledger.mjs";
+import { formatUnits } from "viem";
 
 const SNIPER_CHAINS = ["ethereum", "base", "robinhood"];
 
@@ -474,8 +475,20 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       const signer = wrapSignerGas(await resolveSignerUser(uid, chainKey), maxGasGwei);
       const bal = await getTokenBalance(chainKey, token, signer.address);
       const pct = Math.min(100, Math.max(1, parseFloat(sellPct) || 100));
-      const amountHuman = bal.formatted * (pct / 100);
-      if (!(amountHuman > 0)) throw new Error("token balance is 0");
+      // BigInt-precise scaling (2026-09-21 fix): bal.formatted is a lossy JS
+      // float — round-tripping a large/precise raw balance through it (float
+      // -> *10**decimals -> BigInt(Math.round(...))) can OVERSHOOT the real
+      // on-chain balance by millions of wei-units on tokens with big enough
+      // supply. That overshoot makes the swap's transferFrom pull more than
+      // the wallet holds, reverting even when Permit2 allowance is already
+      // sufficient (found live: sniper sell simulation failing with no
+      // approval prompt, diff of 5,189,183 wei against the real balance).
+      // formatUnits on a BigInt-scaled raw amount keeps full precision as a
+      // string; executeSniperSell/buildV4SellCall parse it back exactly.
+      const rawBal = BigInt(bal.raw);
+      const rawSell = pct >= 100 ? rawBal : (rawBal * BigInt(Math.round(pct * 100))) / 10000n;
+      const amountHuman = formatUnits(rawSell, bal.decimals);
+      if (!(rawSell > 0n)) throw new Error("token balance is 0");
 
       // Direct-sign (2026-09-21 UX): same rule as buy above. EXCEPT Robinhood
       // LONG-platform sells with no explicit pool chosen — that's a two-leg
@@ -498,7 +511,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       }
 
       const result = await executeSniperSell({ signer, chainKey, tokenAddress: token, amountHuman, slippagePct: parseFloat(slippagePct)||3, pool });
-      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: "SELL " + (result.label || result.dex), eth_spent: 0, token_amount: amountHuman, buy_tx_hash: result.txHash, eth_received: result.ethReceived ?? null, user_id: uid });
+      insertSniperTrade({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol, dex: "SELL " + (result.label || result.dex), eth_spent: 0, token_amount: Number(amountHuman), buy_tx_hash: result.txHash, eth_received: result.ethReceived ?? null, user_id: uid });
       // Selling this token makes it the bot's active target — the wallet's
       // position you're acting on should follow the token in the box.
       touchSniperToken({ chain: chainKey, contract_address: token.toLowerCase(), symbol: bal.symbol ?? null, activate: true });

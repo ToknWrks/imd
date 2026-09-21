@@ -1,7 +1,7 @@
 /**
  * Approvals, balances, USD sizing helpers, and token→ETH sells for /sniper.
  */
-import { getAddress, parseAbi, parseEther, formatUnits, encodeFunctionData, encodeAbiParameters, parseAbiParameters } from "viem";
+import { getAddress, parseAbi, parseEther, formatUnits, parseUnits, encodeFunctionData, encodeAbiParameters, parseAbiParameters } from "viem";
 import {
   publicClient,
   getNetwork,
@@ -545,7 +545,19 @@ export async function executeSniperSell({ signer, chainKey, tokenAddress, amount
   const n = getNetwork(chainKey);
   const token = getAddress(tokenAddress);
   const meta = await getTokenMeta(chainKey, token);
-  const amountIn = BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
+  // Callers that derive amountHuman from a raw on-chain balance (full or
+  // partial-position sells) pass a full-precision decimal STRING (via
+  // formatUnits) — parse it exactly with parseUnits. Number(amountHuman) *
+  // 10**decimals loses precision past ~15-17 significant digits, which for
+  // a large-supply token can OVERSHOOT the real on-chain balance by millions
+  // of wei-units and revert the transferFrom even when Permit2 allowance is
+  // already sufficient (found live 2026-09-21, sniper sell simulation
+  // failing with no approval prompt). Callers passing a plain JS number
+  // (typed amounts, probe sizes) keep the old path — String(number) can hit
+  // exponential notation ("1e-7") that parseUnits rejects.
+  const amountIn = typeof amountHuman === "string"
+    ? parseUnits(amountHuman, Number(meta.decimals))
+    : BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
   if (amountIn <= 0n) throw new Error("sell amount must be positive");
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
 
