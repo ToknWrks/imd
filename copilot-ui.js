@@ -143,6 +143,10 @@ async function cpApprove() {
   if (!req.to || !/^0x[0-9a-fA-F]{40}$/.test(req.to)) { cpToast('Malformed sign request — it will be skipped at expiry'); _cpQueue.shift(); cpUpdateBadge(); return; }
   _cpBusy = true;
   cpUpdateBadge();
+  // A user gesture is the best moment to ask for notification permission —
+  // if the load-time prompt never ran (or was dismissed), catch up here so
+  // the NEXT request can deliver an OS notification.
+  try { if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission().catch(function(){}); } catch (e) {}
   try {
     var accts = await window.ethereum.request({ method: 'eth_requestAccounts' });
     var from = accts && accts[0];
@@ -179,10 +183,16 @@ function cpToast(msg) {
   setTimeout(function(){ t.remove(); }, 5000);
 }
 
-// Request Notification permission once when co-pilot is active (best effort).
+// Request Notification permission (best effort). The old gate required the
+// global COPILOT_ACTIVE env flag — always false in per-user mode on hosted —
+// so the prompt NEVER appeared and users got no OS notifications (found live
+// 2026-09-22). Prompt whenever this user has anything copilot-shaped: pending
+// requests or the badge visible. Also retried inside cpApprove (a click is
+// the strongest gesture — browsers favor permission requests from one).
 if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
   fetch('/api/copilot/pending').then(function(r){ return r.json(); }).then(function(j) {
-    if (j.ok && j.active) Notification.requestPermission().catch(function(){});
+    var hasPending = j.ok && j.requests && j.requests.length > 0;
+    if (j.ok && (j.active || hasPending)) Notification.requestPermission().catch(function(){});
   }).catch(function(){});
 }
 

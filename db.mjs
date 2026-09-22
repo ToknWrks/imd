@@ -486,7 +486,12 @@ export function getActiveAccumulationStrategies() {
 
 export function applyAccumulationStrategy({ id, reviewId = "manual", watcherId, proposal, replace = false }) {
   const now = new Date().toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "");
-  const nextScheduledAt = proposal.startAt > now ? proposal.startAt : now;
+  // Dip-only plans (base_buy_usd = 0, 2026-09-22): no scheduled legs exist, so
+  // park next_scheduled_at far past any period end — the scheduler must never
+  // fire a $0 buy. Regular plans schedule the first leg at start.
+  const nextScheduledAt = proposal.baseBuyUsd > 0
+    ? (proposal.startAt > now ? proposal.startAt : now)
+    : "9999-12-31 23:59:59";
   const run = db.transaction(() => {
     const existing = db.prepare("SELECT * FROM accumulation_strategies WHERE watcher_id = ?").get(watcherId);
     if (existing?.active && !replace) throw new Error("an active Zooch strategy already exists for this token; confirm replacement to continue");

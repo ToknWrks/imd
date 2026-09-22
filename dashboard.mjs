@@ -441,7 +441,8 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
           <div class="field"><label>Period (days)</label><input id="stratPeriod" type="number" min="1" max="365" step="1" value="30" required></div>
         </div>
         <div class="row">
-          <div class="field"><label>Base buy ($)</label><input id="stratBase" type="number" min="0.01" step="0.01" required></div>
+          <div class="field"><label>Base buy ($)</label><input id="stratBase" type="number" min="0" step="0.01" required>
+            <span class="hint">0 = dip-only plan (no scheduled buys)</span></div>
           <div class="field"><label>Every (days)</label><input id="stratCadence" type="number" min="0.02" step="0.02" value="3" required></div>
         </div>
         <div class="row">
@@ -467,7 +468,8 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
           const base = parseFloat(document.getElementById('stratBase').value);
           const period = parseFloat(document.getElementById('stratPeriod').value);
           const el = document.getElementById('stratPreview');
-          if (!(budget > 0) || !(cadence > 0) || !(base > 0) || !(period > 0)) { el.textContent = ''; return; }
+          if (!(budget > 0) || !(period > 0) || !(cadence > 0) || !(base >= 0)) { el.textContent = ''; return; }
+          if (base === 0) { el.textContent = 'DIP-ONLY plan: $' + budget.toFixed(2) + ' reserved for dip buys — no scheduled buys.'; return; }
           const tranches = Math.max(1, Math.ceil(period / cadence));
           const scheduled = base * tranches;
           const reserve = Math.max(0, budget - scheduled);
@@ -2088,7 +2090,10 @@ const server = createServer(async (req, res) => {
         const periodDays = Number(body.periodDays ?? 30);
         if (!(totalBudgetUsd > 0)) return json({ ok: false, error: "total budget must be a positive number" });
         if (!(cadenceDays > 0) || cadenceDays > 365) return json({ ok: false, error: "cadence must be between >0 and 365 days" });
-        if (!(baseBuyUsd > 0)) return json({ ok: false, error: "base buy must be a positive number" });
+        // base buy 0 = dip-only plan (2026-09-22): no scheduled legs, the whole
+        // budget is a dip reserve. With base 0 the cadence is irrelevant —
+        // freeze next_scheduled_at far out so the scheduler never fires it.
+        if (!(baseBuyUsd >= 0)) return json({ ok: false, error: "base buy must be >= 0 (0 = dip-only plan)" });
         if (!(dipThresholdUsd >= 0)) return json({ ok: false, error: "dip threshold must be >= 0" });
         if (!(dipBuyUsd > 0)) return json({ ok: false, error: "dip buy must be a positive number" });
         if (!(slippagePct >= 0.1 && slippagePct <= 15)) return json({ ok: false, error: "slippage must be 0.1–15%" });
@@ -2096,7 +2101,7 @@ const server = createServer(async (req, res) => {
         if (!(periodDays >= 1 && periodDays <= 365)) return json({ ok: false, error: "period must be 1–365 days" });
 
         const cadenceMinutes = Math.round(cadenceDays * 1440);
-        const trancheCount = Math.max(1, Math.ceil(periodDays / cadenceDays));
+        const trancheCount = baseBuyUsd > 0 ? Math.max(1, Math.ceil(periodDays / cadenceDays)) : 0;
         const scheduledAllocationUsd = round2(baseBuyUsd * trancheCount);
         const dipReserveUsd = round2(Math.max(0, totalBudgetUsd - scheduledAllocationUsd));
         if (scheduledAllocationUsd + dipReserveUsd > totalBudgetUsd + 0.001) {

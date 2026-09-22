@@ -611,6 +611,10 @@ async function handleSwap(watcher, wethIsToken0, log) {
 async function runScheduledBuys() {
   for (const strategy of getActiveAccumulationStrategies()) {
     if (strategy.next_scheduled_at > new Date().toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "")) continue;
+    // Dip-only plan guard (2026-09-22): base_buy_usd = 0 rows must never fire
+    // a scheduled leg (their next_scheduled_at is parked at 9999; this also
+    // catches legacy rows edited to 0 before that convention existed).
+    if (!(strategy.base_buy_usd > 0)) continue;
     const chainKey = strategy.chain || "ethereum";
     let reservation;
     try {
