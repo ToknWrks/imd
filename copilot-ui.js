@@ -90,14 +90,56 @@ function cpConnectSse() {
 }
 
 /**
- * OS-level browser notification (2026-09-22): visible even when the app tab
- * is in the background or you're on another site — as long as any app tab
- * stays open. Permission is requested once at load when co-pilot is active;
- * silently degrades to the in-page toast when denied/unavailable.
+ * Notifications toggle (Settings): the OS-notification permission prompt is
+ * unreliable when fired passively on page load (browsers suppress or never
+ * show it — found live 2026-09-22). A deliberate click is a user gesture,
+ * which browsers honor, and gives the user a discoverable on/off switch.
+ * Preference lives in localStorage; cpNotify checks both permission AND the
+ * switch.
  */
+window.cpNotificationsEnabled = function() {
+  try { return localStorage.getItem('cpNotify') !== 'off'; } catch { return true; }
+};
+
+window.cpNotificationState = function() {
+  if (typeof Notification === 'undefined') return 'unsupported';
+  return Notification.permission; // 'granted' | 'denied' | 'default'
+};
+
+async function cpToggleNotifications(btn) {
+  var current = window.cpNotificationsEnabled();
+  if (current) {
+    // Turning OFF needs no permission work — just the preference.
+    try { localStorage.setItem('cpNotify', 'off'); } catch {}
+    cpToast('🔕 Browser notifications OFF');
+  } else {
+    try { localStorage.setItem('cpNotify', 'on'); } catch {}
+    // Turning ON: request permission now (user gesture). If the site was
+    // previously denied, tell the user where to un-block it — requestPermission
+    // resolves 'denied' instantly in that case without showing anything.
+    var perm = 'default';
+    try { if (typeof Notification !== 'undefined') perm = await Notification.requestPermission(); } catch {}
+    if (perm === 'granted') cpToast('🔔 Browser notifications ON — you will be pinged for sign requests and skips');
+    else if (perm === 'denied') cpToast('⚠️ Notifications are BLOCKED for this site — allow them in your browser\'s site settings (lock icon in the address bar)');
+    else cpToast('Browser notifications ON (permission still pending — click again if no prompt appeared)');
+  }
+  if (btn) cpRenderNotifBtn(btn);
+}
+
+function cpRenderNotifBtn(btn) {
+  var on = window.cpNotificationsEnabled();
+  var state = window.cpNotificationState();
+  var label;
+  if (!on) label = '🔕 Notifications: OFF (click to enable)';
+  else if (state === 'granted') label = '🔔 Notifications: ON — permission granted';
+  else if (state === 'denied') label = '⚠️ Notifications: blocked in browser settings — allow them, then click';
+  else label = '🔔 Notifications: OFF — click to enable (browser will ask)';
+  btn.textContent = label;
+}
 function cpNotify(title, body) {
   try {
     if (typeof Notification === 'undefined') return;
+    if (!window.cpNotificationsEnabled()) return; // user switch off
     if (Notification.permission === 'granted') {
       var n = new Notification(title, { body: body, tag: 'copilot-sign', silent: false });
       n.onclick = function(){ window.focus(); n.close(); };
@@ -183,18 +225,10 @@ function cpToast(msg) {
   setTimeout(function(){ t.remove(); }, 5000);
 }
 
-// Request Notification permission (best effort). The old gate required the
-// global COPILOT_ACTIVE env flag — always false in per-user mode on hosted —
-// so the prompt NEVER appeared and users got no OS notifications (found live
-// 2026-09-22). Prompt whenever this user has anything copilot-shaped: pending
-// requests or the badge visible. Also retried inside cpApprove (a click is
-// the strongest gesture — browsers favor permission requests from one).
-if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-  fetch('/api/copilot/pending').then(function(r){ return r.json(); }).then(function(j) {
-    var hasPending = j.ok && j.requests && j.requests.length > 0;
-    if (j.ok && (j.active || hasPending)) Notification.requestPermission().catch(function(){});
-  }).catch(function(){});
-}
+// (Notification permission is requested from the Settings toggle — a
+// deliberate user gesture, which browsers honor. Passive load-time prompts
+// are suppressed by modern browsers and the old env-flag gate never opened
+// in per-user mode; both removed 2026-09-22.)
 
 cpInit();
 `;

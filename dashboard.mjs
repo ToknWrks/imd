@@ -1133,8 +1133,20 @@ async function settingsPage(vaultMsg = "", userId = null) {
       </div>
       ${userV2 && userMode === "autonomy" && userV2.grantStatus !== "granted" ? `<p class="hint" style="color:#f87171">⚠ Autonomy selected but the automation grant has not landed — open the <b>wallet slideout</b> and click "Enable automated trading".</p>` : ""}
       ${userMode === "autonomy" && (userV2 ? userV2.grantStatus === "granted" : userHasSessionKey) ? `<p class="hint">✓ Autonomy active — trades sign with your smart wallet${userV2 ? "'s session-key operator" : " session key"}.</p>` : ""}
-      ${userMode === "copilot" ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Timeout: <code>COPILOT_TIMEOUT_S</code> (default 90s).</p>` : ""}
+      ${userMode === "copilot" ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Dip/scheduled buys wait up to 5 minutes; everything else 90s.</p>` : ""}
       <button onclick="saveCopilotMode(this)">Save trading mode</button>
+    </div>
+
+    <div class="card">
+      <h2>Browser notifications</h2>
+      <p class="hint">OS-level popups when a trade needs your signature (or one expired unsigned) — they appear even when this tab is in the background or you're on another site, as long as any dashboard tab stays open. Clicking a notification focuses the app.</p>
+      <button id="cpNotifBtn" class="secondary" onclick="cpToggleNotifications(this)">🔔 Notifications</button>
+      <script>
+        (function(){
+          var b = document.getElementById('cpNotifBtn');
+          if (b && typeof cpRenderNotifBtn === 'function') cpRenderNotifBtn(b);
+        })();
+      </script>
     </div>
 
     <div class="card">
