@@ -1,20 +1,27 @@
 /**
  * copilot.mjs — Co-pilot trading mode: the browser wallet signs, the server proposes.
  *
- * When COPILOT_ACTIVE=true, resolveSigner() returns a co-pilot signer instead
- * of the smart-account/legacy backends. Its callContract() does NOT sign:
- * it enqueues a pending sign request, pushes it to every open dashboard tab
- * via SSE, and blocks on a promise until the user approves (the tab sends the
- * tx through window.ethereum and posts back the hash) or the request
- * times out / is declined (the promise rejects — every engine's existing
- * catch already finalizes strategy reservations and writes the error row,
- * so "skip and log" falls out of the existing failure paths for free).
+ * When COPILOT_ACTIVE=true (or a user's signer_mode is 'copilot'),
+ * resolveSignerUser() returns a co-pilot signer instead of the
+ * smart-account/legacy backends. Its callContract() does NOT sign:
+ * it enqueues a pending sign request and BLOCKS BY POLLING THE SHARED ROW
+ * until the user approves (the tab sends the tx through window.ethereum and
+ * posts back the hash) or the request times out / is declined (the promise
+ * rejects — every engine's existing catch already finalizes strategy
+ * reservations and writes the error row, so "skip and log" falls out of the
+ * existing failure paths for free).
+ *
+ * CROSS-PROCESS (2026-09-22): the engine that enqueues (imd-watcher daemon)
+ * and the HTTP layer that receives approve/decline (imd-dashboard) are
+ * different processes. Settlement is the shared SQLite row — resolveRequest()
+ * writes it, the engine's awaitRequestResolution() poll reads it. No in-memory
+ * waiter, so approval works no matter which process the engine lives in.
  *
  * Multi-tx flows (token approvals, the V4 pre-wrap path) surface as SEQUENTIAL
  * approval prompts — one per callContract, same revert isolation as today.
  *
  * Security model: no key material ever reaches the server. The calldata shown
- * in the approval modal was built by your own local server from your own
+ * in the approval panel was built by your own local server from your own
  * strategy settings — but ALWAYS read the decoded summary before approving.
  */
 
@@ -22,6 +29,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { getChain } from "./chains.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -46,7 +54,8 @@ db.exec(`
     tx_hash      TEXT,
     error        TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at  TEXT
+    resolved_at  TEXT,
+    expires_at   TEXT                         -- absolute UTC deadline (cross-process expiry)
   );
 `);
 
@@ -55,6 +64,41 @@ function ensureColumn(table, column, ddl) {
   if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }
 ensureColumn("copilot_requests", "user_id", "user_id TEXT"); // owning user (Phase 2 isolation)
+ensureColumn("copilot_requests", "expires_at", "TEXT"); // absolute UTC deadline (cross-process expiry)
+
+// ── Request attribution context (2026-09-22) ─────────────────────────────────
+// Engines call buyToken() → sendV4Buy() → callContract() many layers deep —
+// threading { product, symbol, kind, summary } through every signature would
+ // touch a dozen functions. Instead an engine sets the context around its
+ // trade call (withCopilotContext) and callContract merges it in. ALS is
+ // async-aware, so awaits inside buyToken keep the context.
+const _cpContext = new AsyncLocalStorage();
+
+/**
+ * Run `fn` with co-pilot attribution attached to every sign request it
+ * enqueues. Engine call sites: dip-watcher buy paths, mm legs, autosell.
+ * { product, symbol, kind, summary, timeoutS } — each optional; explicit
+ * opts.copilot on a callContract call still wins over the context.
+ */
+export function withCopilotContext(meta, fn) {
+  return _cpContext.run(meta ?? {}, fn);
+}
+
+/** Merge: explicit copilot opts > ALS context > defaults. */
+function attribution({ product, kind, symbol, summary, timeoutS } = {}) {
+  const ctx = _cpContext.getStore() ?? {};
+  const merged = {
+    product: product ?? ctx.product ?? "other",
+    kind,
+    symbol: symbol ?? ctx.symbol ?? null,
+    summary,
+    timeoutS: timeoutS ?? ctx.timeoutS ?? null,
+  };
+  // Default summary when NEITHER layer provided one: callContract builds its
+  // selector-based fallback; only fill in a context-level summary here.
+  if (!merged.summary && ctx.summary) merged.summary = ctx.summary;
+  return merged;
+}
 
 // ── SSE clients (dashboard tabs) ─────────────────────────────────────────────
 const sseClients = new Set();
@@ -77,42 +121,87 @@ function broadcast(event, data) {
   }
 }
 
-// ── Waiting callContract promises, keyed by request id ──────────────────────
-const waiters = new Map(); // id -> { resolve, reject, timer }
+// ── Engine wait: DB-poll based (cross-process, 2026-09-22) ──────────────────
+// The engine that enqueues a request (imd-watcher, dashboard's autosell loop,
+// mm) may live in a DIFFERENT process from the dashboard that receives the
+// approve/decline POSTs. An in-memory waiter map only exists in the enqueuing
+// process, so on hosted the dashboard's resolve POST found no waiter and
+// rejected the hash ("server rejected the hash") while the trade mined
+// on-chain — every engine-initiated co-pilot buy failed to settle (found live
+// 2026-09-22, IMD scheduled buy). The shared SQLite row is the only contract
+// both sides see: the engine polls its row for a terminal status instead of
+// blocking on a promise.
 
 export function isCopilotActive() {
   return process.env.COPILOT_ACTIVE === "true";
 }
 
-export function copilotTimeoutMs() {
-  return Math.max(10, Number(process.env.COPILOT_TIMEOUT_S ?? 90)) * 1000;
+/**
+ * Approval window in ms. Engine trades wait on a human, and the wait must
+ * outlive a tab left in the background — 90s was tuned for "you just clicked
+ * buy". Dip buys fire on the market's schedule, not the user's, so they get a
+ * longer window (5 min) by default. Override per request via
+ * opts.copilot.timeoutS; COPILOT_TIMEOUT_S still sets the base window.
+ */
+export function copilotTimeoutMs({ product = null, kind = null, timeoutS = null } = {}) {
+  const base = Math.max(10, Number(process.env.COPILOT_TIMEOUT_S ?? 90));
+  const seconds = timeoutS ?? (product === "dip" && (kind === "buy" || kind == null) ? Math.max(base, 300) : base);
+  return Math.max(10, seconds) * 1000;
 }
 
-function expire(id, status, error) {
-  const w = waiters.get(id);
-  if (w) {
-    clearTimeout(w.timer);
-    waiters.delete(id);
-    w.reject(new Error(error));
+/** Terminal status → throw message. Returns the tx hash on approval. */
+function settlement(row) {
+  if (!row) return { error: "copilot request row disappeared" };
+  if (row.status === "approved") return { txHash: row.tx_hash };
+  if (row.status === "declined") return { error: row.error || "declined by user in browser" };
+  if (row.status === "expired") return { error: row.error || "no approval within the window — trade skipped (never trades without explicit approval)" };
+  if (row.status === "error") return { error: row.error || "request errored" };
+  return null; // still pending
+}
+
+/**
+ * Poll the request row until a terminal status lands (from ANY process —
+ * the dashboard writes approve/decline, the sweep writes expired). Resolves
+ * to the browser tx hash on approval; rejects on decline/timeout. Every
+ * engine's existing catch already finalizes reservations + writes the error
+ * row, so "skip and log" falls out of the existing failure paths.
+ */
+export async function awaitRequestResolution(id, { pollMs = 2000, maxMs = 15 * 60_000 } = {}) {
+  const start = Date.now();
+  for (;;) {
+    const row = getRequest(id);
+    const s = settlement(row);
+    if (s && s.txHash !== undefined) return s.txHash;
+    if (s && s.error) throw new Error(s.error);
+    // Hard backstop independent of expires_at: a clock edge or a missing
+    // expires_at column must never hang an engine forever.
+    if (Date.now() - start > maxMs) {
+      expire(id, "expired", "no approval within the window — trade skipped (never trades without explicit approval)");
+      throw new Error("no approval within the window — trade skipped (never trades without explicit approval)");
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
   }
+}
+
+/** Mark a pending request terminal (any process may expire its own sweep). */
+function expire(id, status, error) {
   db.prepare(`UPDATE copilot_requests SET status = ?, error = ?, resolved_at = datetime('now') WHERE id = ? AND status = 'pending'`)
     .run(status, error, id);
   broadcast("resolved", { id, status });
 }
 
-// Expire stale pending rows on startup (a restart orphans waiters by design —
-// "broken" and "never ran" must be distinguishable, so mark them, don't delete).
-const stale = db.prepare(`SELECT id FROM copilot_requests WHERE status = 'pending'`).all();
-for (const row of stale) {
-  db.prepare(`UPDATE copilot_requests SET status = 'expired', error = 'server restarted while awaiting approval', resolved_at = datetime('now') WHERE id = ?`).run(row.id);
-}
-
-// Periodic sweep in case a timer is lost (process hiccup, clock edge).
+// Periodic sweep: expire pending rows past their expires_at. Runs in EVERY
+// process that imports copilot.mjs, so expiry happens even if the enqueuing
+// engine is the only one alive. (This replaced the old startup sweep that
+// expired ALL pending rows on import — with cross-process requests, one
+// process restarting must not kill another process's live request.)
 setInterval(() => {
-  const cutoff = copilotTimeoutMs();
-  for (const [id, w] of waiters) {
-    if (Date.now() - w.createdAt >= cutoff) expire(id, "expired", `no approval within ${cutoff / 1000}s — trade skipped (never trades without explicit approval)`);
-  }
+  try {
+    const stale = db.prepare(`SELECT id FROM copilot_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= datetime('now')`).all();
+    for (const row of stale) {
+      expire(row.id, "expired", "no approval within the window — trade skipped (never trades without explicit approval)");
+    }
+  } catch {}
 }, 5000).unref();
 
 // ── Request lifecycle ────────────────────────────────────────────────────────
@@ -129,9 +218,12 @@ export function listPending() {
       to: r.to_address,
       value: r.value_wei ?? "0",
       // created_at is a UTC SQLite timestamp; convert to epoch ms for the
-      // countdown. Original timeout = COPILOT_TIMEOUT_MS (same window the
-      // live request got) applied on top of created_at.
-      expiresAt: Date.parse(r.created_at + "Z") + copilotTimeoutMs(),
+      // countdown. Deadline = the row's own expires_at (set at enqueue time,
+      // so a per-product longer window survives a page reload); fall back to
+      // created_at + base window for rows created before that column existed.
+      expiresAt: r.expires_at
+        ? Date.parse(r.expires_at + "Z")
+        : Date.parse(r.created_at + "Z") + copilotTimeoutMs(),
     }));
 }
 
@@ -146,16 +238,19 @@ export function getRequest(id) {
 /**
  * Create a pending request and wait for the user's browser signature.
  * Resolves to the tx hash; rejects on decline/timeout/server shutdown.
+ * Cross-process safe (2026-09-22): the engine may live in imd-watcher while
+ * approve/decline land via the dashboard process — settlement is read back
+ * from the shared SQLite row, never from an in-memory waiter.
  */
-function awaitBrowserSignature({ chain, kind, product, symbol, summary, to, value, data, userId = null }) {
+function awaitBrowserSignature({ chain, kind, product, symbol, summary, to, value, data, userId = null, timeoutS = null }) {
   const id = `cp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const dep = getChain(chain);
-  const timeoutMs = copilotTimeoutMs();
+  const timeoutMs = copilotTimeoutMs({ product, kind, timeoutS });
 
   db.prepare(`
-    INSERT INTO copilot_requests (id, chain, kind, product, symbol, summary, to_address, value_wei, data, user_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, chain, kind, product, symbol ?? null, summary ?? null, to, value.toString(), data, userId);
+    INSERT INTO copilot_requests (id, chain, kind, product, symbol, summary, to_address, value_wei, data, user_id, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+' || ? || ' seconds'))
+  `).run(id, chain, kind, product, symbol ?? null, summary ?? null, to, value.toString(), data, userId, Math.round(timeoutMs / 1000));
 
   const payload = {
     id, chain, chainId: dep.viemChain.id, chainName: dep.name,
@@ -166,16 +261,10 @@ function awaitBrowserSignature({ chain, kind, product, symbol, summary, to, valu
   broadcast("request", payload);
   console.log(`[copilot] ⏳ ${product}/${kind} request ${id} on ${dep.name} — awaiting browser approval (${timeoutMs / 1000}s)`);
 
-  return new Promise((resolvePromise, rejectPromise) => {
-    const timer = setTimeout(
-      () => expire(id, "expired", `no approval within ${timeoutMs / 1000}s — trade skipped (never trades without explicit approval)`),
-      timeoutMs,
-    );
-    waiters.set(id, { resolve: resolvePromise, reject: rejectPromise, timer, createdAt: Date.now() });
-  });
+  return awaitRequestResolution(id);
 }
 
-/** Browser approved + broadcast the tx — settle the waiter. */
+/** Browser approved + broadcast the tx — settle the request (any process). */
 export function resolveRequest(id, txHash, resolvedBy = null) {
   const row = getRequest(id);
   if (!row || row.status !== "pending") return { ok: false, error: "request not pending" };
@@ -184,14 +273,9 @@ export function resolveRequest(id, txHash, resolvedBy = null) {
   if (row.user_id && resolvedBy && String(resolvedBy).toLowerCase() !== String(row.user_id).toLowerCase()) {
     return { ok: false, error: "not your sign request" };
   }
-  const w = waiters.get(id);
-  if (!w) return { ok: false, error: "no waiter (server restarted?)" };
-  clearTimeout(w.timer);
-  waiters.delete(id);
   db.prepare(`UPDATE copilot_requests SET status = 'approved', tx_hash = ?, resolved_at = datetime('now') WHERE id = ?`).run(txHash, id);
-  w.resolve(txHash);
   broadcast("resolved", { id, status: "approved", txHash });
-  console.log(`[copilot] ✅ request ${id} approved — tx ${txHash}`);
+  console.log(`[copilot] ✅ request ${id} approved — tx ${txHash} (engine picks it up via the shared row)`);
   return { ok: true };
 }
 
@@ -257,18 +341,20 @@ export async function buildCoPilotSignerFor(userId, chainKey = "ethereum") {
         const data = encodeFunctionData({ abi, functionName, args: args ?? [] });
         const sel = data.slice(0, 10);
         const eth = value ? Number(value) / 1e18 : 0;
-        const summary = copilot?.summary
-          ?? `${copilot?.kind ?? "call"} ${functionName ?? sel} → ${contractAddress}${eth ? ` · ${eth.toFixed(6)} ETH` : ""}`;
+        const attr = attribution(copilot);
+        const summary = attr.summary
+          ?? `${attr.kind ?? "call"} ${functionName ?? sel} → ${contractAddress}${eth ? ` · ${eth.toFixed(6)} ETH` : ""}`;
         return awaitBrowserSignature({
           chain: chainKey,
-          kind: copilot?.kind ?? (functionName === "approve" ? "approve" : eth > 0n ? "buy" : "other"),
-          product: copilot?.product ?? "other",
-          symbol: copilot?.symbol ?? null,
+          kind: attr.kind ?? (functionName === "approve" ? "approve" : eth > 0n ? "buy" : "other"),
+          product: attr.product,
+          symbol: attr.symbol,
           summary,
           to: contractAddress,
           value: value ?? 0n,
           data,
           userId,
+          timeoutS: attr.timeoutS,
         });
       },
     };

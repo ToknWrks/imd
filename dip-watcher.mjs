@@ -51,6 +51,23 @@ async function userSigner(watcher, chainKey) {
 const { getWsClient, getChain } = await import("./chains.mjs");
 const { startWatchdog, stopWatchdog, noteWsActivity } = await import("./ws-watchdog.mjs");
 const { alert } = await import("./notify.mjs");
+const { withCopilotContext } = await import("./copilot.mjs");
+
+/**
+ * Attribution for co-pilot sign requests fired by a watcher trade (2026-09-22):
+ * wraps the buy so the approval panel shows "DIP BUY · IMD · 0.0073 ETH" —
+ * not the raw "call execute → 0x66a9…" selector summary it used to. mode
+ * distinguishes the trigger for the badge/toast text.
+ */
+function cpAttribution(watcher, mode) {
+  const eth = watcher.buy_amount_usd != null && watcher.buy_amount_usd > 0 ? ` · $${Number(watcher.buy_amount_usd).toFixed(0)}` : "";
+  return {
+    product: "dip",
+    symbol: watcher.symbol ?? watcher.contract_address,
+    kind: "buy",
+    summary: `${mode} · ${watcher.symbol ?? watcher.contract_address}${eth}`,
+  };
+}
 
 // Trade-failure alerting: dedupe key includes the watcher so repeated failures
 // on different tokens all surface, but the same token's flapping doesn't spam.
@@ -280,9 +297,10 @@ async function handleV4Swap(watcher, pool, log) {
     // Route by venue: dollar-quote pools are paid with the chain's dollar
     // token (no ETH side to settle); everything else pays with native ETH
     // (buyToken does the ETH pre-flight balance guard internally).
-    const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, {
-      slippagePct: watcher.slippage_pct, pool, chainKey,
-    });
+    const { txHash, quotedOut, eth_spent } = await withCopilotContext(cpAttribution(watcher, "DIP BUY"), () =>
+      buyToken(signer, watcher.contract_address, buyAmountUsd, {
+        slippagePct: watcher.slippage_pct, pool, chainKey,
+      }));
     const tokenAmount = Number(formatUnits(quotedOut, watcher.decimals ?? 18));
 
     if (reservation) {
@@ -365,7 +383,8 @@ async function handleV3DollarSwap(watcher, pool, log) {
     const signer = await userSigner(watcher, chainKey);
     // Route by venue: buyToken picks the multi-hop (ETH→dollar→token) path
     // automatically for a V3 dollar-quoted venue.
-    const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey });
+    const { txHash, quotedOut, eth_spent } = await withCopilotContext(cpAttribution(watcher, "DIP BUY"), () =>
+      buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey }));
     const tokenAmount = Number(formatUnits(quotedOut, watcher.decimals ?? 18));
 
     if (reservation) {
@@ -472,7 +491,8 @@ async function handleAeroSwap(watcher, pool, log) {
     const signer = await userSigner(watcher, chainKey);
     // Execute via the standard Uniswap routing (buyToken) — smallest-slippage
     // venue for a small clip; the Aerodrome pool is only the *signal*.
-    const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey });
+    const { txHash, quotedOut, eth_spent } = await withCopilotContext(cpAttribution(watcher, "DIP BUY"), () =>
+      buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey }));
     const tokenAmount = Number(formatUnits(quotedOut, watcher.decimals ?? 18));
 
     if (reservation) {
@@ -552,7 +572,8 @@ async function handleSwap(watcher, wethIsToken0, log) {
   try {
     const signer = await userSigner(watcher, chainKey);
     // Route by venue (V3 path is always ETH-paid; buyToken does the balance guard)
-    const { txHash, quotedOut, eth_spent } = await buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey });
+    const { txHash, quotedOut, eth_spent } = await withCopilotContext(cpAttribution(watcher, "DIP BUY"), () =>
+      buyToken(signer, watcher.contract_address, buyAmountUsd, { slippagePct: watcher.slippage_pct, chainKey }));
     const tokenAmount = Number(formatUnits(quotedOut, watcher.decimals ?? 18));
 
     if (reservation) {
@@ -602,7 +623,8 @@ async function runScheduledBuys() {
       });
       const signer = await userSigner(strategy, chainKey);
       // Route by venue: dollar-quote pools pay with the chain's dollar token.
-      const { txHash, quotedOut, eth_spent } = await buyToken(signer, strategy.contract_address, strategy.base_buy_usd, { slippagePct: strategy.slippage_pct, chainKey });
+      const { txHash, quotedOut, eth_spent } = await withCopilotContext(cpAttribution(strategy, "SCHEDULED BUY"), () =>
+        buyToken(signer, strategy.contract_address, strategy.base_buy_usd, { slippagePct: strategy.slippage_pct, chainKey }));
       const tokenAmount = Number(formatUnits(quotedOut, strategy.decimals ?? 18));
       finalizeStrategyExecution({ executionId: reservation.executionId, txHash });
       reservation = null;

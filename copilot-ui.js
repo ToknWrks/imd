@@ -1,14 +1,15 @@
 /**
- * copilot-ui.js — header badge + approval modal + SSE client for co-pilot mode.
+ * copilot-ui.js — header badge + approval panel + SSE client for co-pilot mode.
  * Ships COPILOT_BADGE (header markup) and COPILOT_JS (inline script, zero deps),
  * mirroring wallet-connect.js's export style.
  *
- * Flow: the server's engines enqueue sign requests while in co-pilot mode
- * (COPILOT_ACTIVE=true). This script receives them over SSE, shows a modal
- * with a decoded summary, and on Approve sends the tx via the browser wallet
- * (window.ethereum), posting the hash back to /api/copilot/resolve. Decline
- * (or the server's own timeout) rejects the engine's await — the trade is
- * skipped and logged, never executed unsigned.
+ * Flow: the server's engines enqueue sign requests while in co-pilot mode.
+ * This script receives them over SSE (or via the page-load pending restore)
+ * and shows a PULSING ⏳ BADGE — no auto-popup (2026-09-22). Clicking the
+ * badge opens the sign panel with a decoded summary; Approve sends the tx via
+ * the browser wallet (window.ethereum), posting the hash back to
+ * /api/copilot/resolve. Decline (or the server's own timeout) rejects the
+ * engine's await — the trade is skipped and logged, never executed unsigned.
  */
 
 export const COPILOT_BADGE = `
@@ -19,13 +20,15 @@ export const COPILOT_BADGE = `
 .copilot-badge { background:rgba(232,182,97,0.15); border-color:rgba(232,182,97,0.5); color:#e8b661; }
 .copilot-badge.has-pending { animation: copilotPulse 1.2s ease-in-out infinite; }
 @keyframes copilotPulse { 0%,100% { opacity:1 } 50% { opacity:0.55 } }
-/* Native <dialog> (2026-09-20): the exit modal on /tokens is a <dialog>
-   opened via showModal() — those render in the browser's TOP LAYER, above
-   any z-index, so a fixed-position approval div was always hidden behind
-   it. As a dialog, the approval opens after and stacks above it. */
-dialog#cpModalBackdrop { background:transparent; border:none; padding:0; max-width:none; width:auto; height:auto; display:none; align-items:center; justify-content:center; }
+/* Native <dialog> (2026-09-20): renders in the browser's TOP LAYER, above
+   any z-index, so it stacks above the exit <dialog> on /tokens.
+   Placement (2026-09-22): anchored TOP-RIGHT under the header, next to
+   where the ⏳ badge lives — it used to render bottom-left (fallback path
+   without flex centering), visually disconnected from the badge that
+   opened it. */
+dialog#cpModalBackdrop { background:transparent; border:none; padding:0; max-width:none; width:auto; height:auto; display:none; align-items:flex-start; justify-content:flex-end; padding:3.6rem 1rem 0 0; }
 dialog#cpModalBackdrop[open] { display:flex; }
-dialog#cpModalBackdrop::backdrop { background:rgba(0,0,0,0.65); }
+dialog#cpModalBackdrop::backdrop { background:rgba(0,0,0,0.45); }
 #cpModal { background:#16181d; border:1px solid rgba(232,182,97,0.4); border-radius:10px; max-width:460px; width:92%; padding:1.2rem 1.3rem; color:#fafafa; font-size:0.9rem; }
 #cpModal h3 { margin:0 0 0.5rem; font-size:1rem; color:#e8b661; }
 #cpModal .cp-row { display:flex; justify-content:space-between; gap:0.8rem; padding:0.3rem 0; border-bottom:1px solid rgba(255,255,255,0.06); }
@@ -58,11 +61,11 @@ function cpInit() {
     var hasPending = j.ok && j.requests && j.requests.length > 0;
     if (area) area.style.display = (j.ok && (j.active || hasPending)) ? 'inline' : 'none';
     if (hasPending) {
-      // Restored session: adopt pending requests (dedupe by id). Show the
-      // modal even when the global env flag is off — the request EXISTS and
-      // a trade is waiting on THIS user's approval.
+      // Restored session: adopt pending requests (dedupe by id). NO
+      // auto-popup (2026-09-22): the user decides when to review — the
+      // pulsing ⏳ badge is the notification; clicking it opens the panel.
       _cpQueue = j.requests.filter(function(r){ return !_cpCurrent || r.id !== _cpCurrent.id; });
-      cpUpdateBadge(); cpShowNext();
+      cpUpdateBadge();
     }
   }).catch(function(){});
   cpConnectSse();
@@ -78,7 +81,14 @@ function cpConnectSse() {
         if (_cpCurrent && req.id === _cpCurrent.id) return;
         if (_cpQueue.some(function(r){ return r.id === req.id; })) return;
         _cpQueue.push(req);
-        cpUpdateBadge(); cpShowNext();
+        cpUpdateBadge();
+        // NO auto-popup (2026-09-22): the SSE push only queues + updates the
+        // badge + toasts. The badge pulse is the notification; clicking it
+        // opens the sign panel (cpOpenQueue). A popup that appears out of
+        // nowhere while you're mid-task on another tab is hostile UX.
+        var lbl = { buy:'Buy', sell:'Sell', approve:'Token approval', wrap:'Wrap ETH', other:'Call' }[req.kind] || req.kind;
+        var sym = req.symbol ? ' · ' + req.symbol : '';
+        cpToast('⏳ Co-pilot: ' + lbl + sym + ' awaiting your approval — click the ⏳ badge (top right)');
       } catch (e) {}
     });
     _cpSse.addEventListener('resolved', function(ev) {
