@@ -2191,8 +2191,12 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
   }
 
   // AMM venues: resolve the venue, then build via the exported V4/V3 builders.
+  // Import resolvePoolOverride from dip-swap (its defining module) — sniper-extras
+  // only imports it, never re-exports, so `import("./sniper-extras.mjs").resolvePoolOverride`
+  // was undefined → "poolOverride/resolvePoolOverride is not a function" on
+  // every watcher exit with a saved pool (found live 2026-09-22, IMD sell).
   const chosen = watcher.pool_address
-    ? await (async () => { const { resolvePoolOverride } = await import("./sniper-extras.mjs"); return resolvePoolOverride(token, watcher.pool_address, chainKey); })()
+    ? await (async () => { const { resolvePoolOverride } = await import("./dip-swap.mjs"); return resolvePoolOverride(token, watcher.pool_address, chainKey); })()
     : null;
   if (chosen?.kind === "v4" || (!chosen && watcher.pool_address == null)) {
     // V4 pool (saved or auto-resolved)
