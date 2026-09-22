@@ -61,7 +61,22 @@ function cpConnectSse() {
         cpUpdateBadge();
         var lbl = { buy:'Buy', sell:'Sell', approve:'Token approval', wrap:'Wrap ETH', other:'Call' }[req.kind] || req.kind;
         var sym = req.symbol ? ' · ' + req.symbol : '';
-        cpToast('⏳ Co-pilot: ' + lbl + sym + ' — click the ⏳ badge to sign');
+        var msg = 'Co-pilot: ' + (req.summary || (lbl + sym)) + ' — click the ⏳ badge to sign';
+        cpToast('⏳ ' + msg);
+        cpNotify('⏳ Co-pilot sign request', msg);
+        cpTitleMarker();
+      } catch (e) {}
+    });
+    _cpSse.addEventListener('skipped', function(ev) {
+      try {
+        var j = JSON.parse(ev.data);
+        _cpQueue = _cpQueue.filter(function(r){ return r.id !== j.id; });
+        cpUpdateBadge();
+        var sym = j.symbol ? ' · ' + j.symbol : '';
+        var msg = (j.status === 'expired' ? 'expired unsigned' : 'declined') + ' — trade skipped and logged' + (j.error ? ' (' + j.error + ')' : '');
+        cpToast('✗ ' + sym + ' ' + msg);
+        cpNotify('✗ Co-pilot trade skipped', sym + ' ' + msg);
+        cpTitleMarker();
       } catch (e) {}
     });
     _cpSse.addEventListener('resolved', function(ev) {
@@ -74,14 +89,41 @@ function cpConnectSse() {
   } catch (e) { _cpSse = null; }
 }
 
+/**
+ * OS-level browser notification (2026-09-22): visible even when the app tab
+ * is in the background or you're on another site — as long as any app tab
+ * stays open. Permission is requested once at load when co-pilot is active;
+ * silently degrades to the in-page toast when denied/unavailable.
+ */
+function cpNotify(title, body) {
+  try {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission === 'granted') {
+      var n = new Notification(title, { body: body, tag: 'copilot-sign', silent: false });
+      n.onclick = function(){ window.focus(); n.close(); };
+    }
+  } catch (e) {}
+}
+
+// Tab-title marker so an unfocused app tab with pending work is visible in
+// the tab strip itself.
+var _cpBaseTitle = null;
+function cpTitleMarker() {
+  if (_cpBaseTitle === null) _cpBaseTitle = document.title.replace(/^⏳ \d+ — /, '');
+  var n = _cpQueue.length;
+  document.title = n > 0 ? '⏳ ' + n + ' — ' + _cpBaseTitle : _cpBaseTitle;
+}
+
 function cpUpdateBadge() {
   var b = document.getElementById('copilotBadge');
-  if (!b) return;
-  var n = _cpQueue.length;
-  b.textContent = '⏳ ' + n;
-  b.classList.toggle('has-pending', n > 0);
-  b.classList.toggle('cp-busy', _cpBusy);
-  b.title = n ? n + ' trade(s) waiting — click to sign in your wallet' : 'No trades awaiting approval';
+  if (b) {
+    var n = _cpQueue.length;
+    b.textContent = '⏳ ' + n;
+    b.classList.toggle('has-pending', n > 0);
+    b.classList.toggle('cp-busy', _cpBusy);
+    b.title = n ? n + ' trade(s) waiting — click to sign in your wallet' : 'No trades awaiting approval';
+  }
+  cpTitleMarker();
 }
 
 /**

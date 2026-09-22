@@ -121,6 +121,53 @@ function broadcast(event, data) {
   }
 }
 
+// ── Cross-process SSE bridge (2026-09-22) ────────────────────────────────────
+// broadcast() only reaches tabs connected to THIS process. When the engine
+// that enqueues a request lives in imd-watcher, its broadcast lands nowhere —
+// the dashboard process holds the SSE connections but never learns a request
+// appeared, so tabs got no toast and the badge stayed stale until reload
+// (found live: user logged in, watching the page, saw nothing). Fix: poll the
+// shared table here in whatever process holds SSE clients and push the
+// diffs. Rows this process enqueued itself were already broadcast() — the
+// _cpAnnounced set dedupes those so tabs don't see a request twice.
+const _cpAnnounced = new Set();
+
+function diffAndBroadcastCopilotRows() {
+  try {
+    const rows = db.prepare(`SELECT * FROM copilot_requests WHERE status IN ('pending','expired','declined') AND created_at > datetime('now', '-1 hour') ORDER BY created_at ASC`).all();
+    for (const row of rows) {
+      if (_cpAnnounced.has(row.id)) continue;
+      _cpAnnounced.add(row.id);
+      if (row.status === "pending") {
+        broadcast("request", {
+          id: row.id, chain: row.chain, kind: row.kind, product: row.product,
+          symbol: row.symbol, summary: row.summary, to: row.to_address,
+          value: row.value_wei ?? "0", data: row.data,
+          expiresAt: row.expires_at ? Date.parse(row.expires_at + "Z") : Date.now() + copilotTimeoutMs(),
+        });
+      } else {
+        // Expired/declined rows the user never signed — surfaced so the UI
+        // can say "this trade was skipped", not just silently drop the badge.
+        broadcast("skipped", { id: row.id, status: row.status, symbol: row.symbol, product: row.product, error: row.error });
+      }
+    }
+    // Keep the dedupe set bounded (last hour is plenty).
+    if (_cpAnnounced.size > 500) {
+      const cutoff = Date.now() - 60 * 60_000;
+      for (const id of _cpAnnounced) {
+        const r = getRequest(id);
+        if (!r || Date.parse(r.created_at + "Z") < cutoff) _cpAnnounced.delete(id);
+      }
+    }
+  } catch (e) {
+    console.error("[copilot] SSE bridge poll failed:", e.message);
+  }
+}
+
+// Only run the bridge in processes that actually hold SSE clients — in the
+// watcher process the client set is empty and the poll is wasted work.
+setInterval(() => { if (sseClients.size > 0) diffAndBroadcastCopilotRows(); }, 3000).unref();
+
 // ── Engine wait: DB-poll based (cross-process, 2026-09-22) ──────────────────
 // The engine that enqueues a request (imd-watcher, dashboard's autosell loop,
 // mm) may live in a DIFFERENT process from the dashboard that receives the
