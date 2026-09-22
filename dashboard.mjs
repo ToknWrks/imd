@@ -1140,15 +1140,13 @@ async function settingsPage(vaultMsg = "", userId = null) {
     <div class="card">
       <h2>Browser notifications</h2>
       <p class="hint">OS-level popups when a trade needs your signature (or one expired unsigned) — they appear even when this tab is in the background or you're on another site, as long as any dashboard tab stays open. Clicking a notification focuses the app.</p>
-      <button id="cpNotifBtn" class="secondary" onclick="cpToggleNotifications(this)">🔔 Notifications</button>
-      <script>
-        (function(){
-          var b = document.getElementById('cpNotifBtn');
-          if (b && typeof cpRenderNotifBtn === 'function') cpRenderNotifBtn(b);
-        })();
-      </script>
+      <button id="cpNotifBtn" class="cp-notif-toggle" onclick="cpToggleNotifications(this)">Notifications</button>
     </div>
 
+    <!-- MM wallet card hidden (2026-09-22): MM isn't offered on hosted yet.
+         Restore this card when the product ships. saveMmKey() in the inline
+         script stays harmless — nothing references it without the input. -->
+    <!--
     <div class="card">
       <h2>Market Maker wallet</h2>
       <p class="hint">Optional dedicated hot wallet for the MM bot — its ETH and token inventory stay fully segregated from the dip strategies. Leave blank to have the MM bot share the main AGENT_PRIVATE_KEY signer. Key never leaves this machine.</p>
@@ -1156,6 +1154,7 @@ async function settingsPage(vaultMsg = "", userId = null) {
       <button onclick="saveMmKey()">Save MM key</button>
       ${mmPk ? `<p class="hint" style="margin-top:0.5rem">MM bot signs from <code>${mmAddress}</code> (dedicated)</p>` : `<p class="hint" style="margin-top:0.5rem">MM bot currently shares the main signer.</p>`}
     </div>
+    -->
 
     <div class="card">
       <h2>RPC</h2>

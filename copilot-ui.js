@@ -21,6 +21,11 @@ export const COPILOT_BADGE = `
 .copilot-badge.has-pending { animation: copilotPulse 1.2s ease-in-out infinite; }
 @keyframes copilotPulse { 0%,100% { opacity:1 } 50% { opacity:0.55 } }
 .copilot-badge.cp-busy { animation:none; opacity:0.6; cursor:wait; }
+/* Settings notifications toggle (no icon — the button IS the switch) */
+.cp-notif-toggle { border-radius:999px; padding:0.45rem 1.1rem; font-weight:600; cursor:pointer; border:1px solid rgba(255,255,255,0.15); background:rgba(255,255,255,0.06); color:#fafafa; transition:all 0.15s ease; }
+.cp-notif-toggle.toggle-on { background:rgba(74,222,128,0.15); border-color:rgba(74,222,128,0.5); color:#4ade80; }
+.cp-notif-toggle.toggle-off { background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.2); color:#9aa0a6; }
+.cp-notif-toggle:hover { filter:brightness(1.15); }
 </style>`;
 
 export const COPILOT_JS = /* js */`
@@ -120,7 +125,7 @@ async function cpToggleNotifications(btn) {
     var perm = 'default';
     try { if (typeof Notification !== 'undefined') perm = await Notification.requestPermission(); } catch {}
     if (perm === 'granted') cpToast('🔔 Browser notifications ON — you will be pinged for sign requests and skips');
-    else if (perm === 'denied') cpToast('⚠️ Notifications are BLOCKED for this site — allow them in your browser\'s site settings (lock icon in the address bar)');
+    else if (perm === 'denied') cpToast('⚠️ Notifications are blocked for this site — allow them in browser site settings (the lock icon in the address bar), then click again');
     else cpToast('Browser notifications ON (permission still pending — click again if no prompt appeared)');
   }
   if (btn) cpRenderNotifBtn(btn);
@@ -129,12 +134,16 @@ async function cpToggleNotifications(btn) {
 function cpRenderNotifBtn(btn) {
   var on = window.cpNotificationsEnabled();
   var state = window.cpNotificationState();
+  // True toggle (no icon): the button IS the switch. Label = state, styling
+  // = the app's on/off pill pattern (same as the status pills elsewhere).
   var label;
-  if (!on) label = '🔕 Notifications: OFF (click to enable)';
-  else if (state === 'granted') label = '🔔 Notifications: ON — permission granted';
-  else if (state === 'denied') label = '⚠️ Notifications: blocked in browser settings — allow them, then click';
-  else label = '🔔 Notifications: OFF — click to enable (browser will ask)';
+  if (!on) label = 'Notifications: OFF';
+  else if (state === 'granted') label = 'Notifications: ON';
+  else if (state === 'denied') label = 'Notifications: blocked in browser settings — allow them, then click';
+  else label = 'Notifications: click to enable';
   btn.textContent = label;
+  btn.classList.toggle('toggle-on', on && state === 'granted');
+  btn.classList.toggle('toggle-off', !on);
 }
 function cpNotify(title, body) {
   try {
@@ -231,4 +240,10 @@ function cpToast(msg) {
 // in per-user mode; both removed 2026-09-22.)
 
 cpInit();
+
+// Settings toggle initial state (runs on every page; no-op without the button)
+(function(){
+  var b = document.getElementById('cpNotifBtn');
+  if (b && typeof cpRenderNotifBtn === 'function') cpRenderNotifBtn(b);
+})();
 `;
