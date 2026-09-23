@@ -57,7 +57,7 @@ import {
   insertDipTrade, getSniperTrades, reserveStrategyExecution, finalizeStrategyExecution,
   addHoneypotToken, removeHoneypotToken, insertSniperTrade, touchSniperToken,
 } from "./db.mjs";
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits, getAddress, parseAbi, encodeFunctionData } from "viem";
 import { getTokenMeta, resolvePoolOverride, buyToken } from "./dip-swap.mjs";
 import { WALLET_NAV_BUTTON, WALLET_SLIDEOUT_CSS, walletSlideoutHtml } from "./wallet-slideout.js";
 import { WALLET_CONNECT_BUTTON, WALLET_CONNECT_JS } from "./wallet-connect.js";
