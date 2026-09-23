@@ -173,6 +173,12 @@ function renderSmartWalletSection(){
       h2+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
       h2+=swHintRow('swInEthHint');
     }
+    // USDC row (2026-09-24): owner USDC balance from the v2 status (owner.usd);
+    // Fund signs a plain USDC.transfer(SCW) in the browser.
+    h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(owner.usd)+'</span></div>';
+    if(browserWallet2){
+      h2+='<div class="sw-move-row"><input id="swInUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','usdc')" + '">Fund \u2192</button></div>';
+    }
     // Token rows (2026-09-20): EVERY token the user holds renders here with
     // its own Fund box — IMD first (platform token), then watched tokens.
     // Data: ownerBalance/scwBalance per token from /api/wallet (per-wallet
@@ -209,17 +215,18 @@ function renderSmartWalletSection(){
     h2+='<div class="sw-card"><div class="sw-card-title">Smart wallet <span class="hint">'+_we(s.custodyLabel||'your EOA owns it')+'</span></div>';
     h2+=_swAddrRow(scw&&scw.address);
     h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw&&scw.eth)+'</span>'+usd(scw&&scw.eth!=null?scw.eth*ethUsd2:null)+'</div>';
-    // USDC row (2026-09-24): autonomy sells pay proceeds into this SCW as
-    // USDC; sweep-usd moves it back to the EOA on demand.
-    h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(s.usd)+'</span></div>';
-    if(browserWallet2){
-      h2+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillUsdMaxV2()" title="Sweep the entire USDC balance">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','usdc')" + '">\u2190 Move out</button></div>';
-    }
     // Move-out is browser-signed for v2 (owner EOA sends directly)
     if(browserWallet2){
       h2+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMaxV2()" title="Fill the full balance — a direct sweep takes no gas from the wallet, so 100% goes out">MAX</button><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('eth')" + '">\u2190 Move out</button></div>';
       h2+=swHintRow('swOutEthHint');
       h2+='<div class="hint" style="margin-top:0.25rem;font-size:0.66rem">Sweep = sign in your wallet; 100% of the balance can go \u2014 your EOA pays the tx gas from outside, the smart wallet sends everything.</div>';
+    }
+    // USDC block (2026-09-24): autonomy sells pay proceeds into this SCW as
+    // USDC; the sweep-usd route (session signer UO) moves it back to the EOA.
+    // Balance lives at scw.usd in the v2 status response.
+    h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(scw&&scw.usd)+'</span></div>';
+    if(browserWallet2){
+      h2+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillUsdMaxV2()" title="Sweep the entire USDC balance">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','usdc')" + '">\u2190 Move out</button></div>';
     }
     // Token rows: every held token with display + MAX + Move out (direct
     // sweep). IMD uses the configured token address; watched tokens carry
@@ -513,11 +520,11 @@ function swFillUsdMax() {
   if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet USDC balance'); }
   else _swStatus('no smart-wallet USDC balance — check the balance read (refresh the page)');
 }
-// v2 variant: the v2 status is FLAT (s.usd), not nested under scw.
+// v2 variant: the v2 status nests the SCW balance at scw.usd.
 function swFillUsdMaxV2() {
   const inp = document.getElementById('swOutUsd');
   if (!inp || !_swState) return;
-  const b = _swState.usd;
+  const b = _swState.scw && _swState.scw.usd;
   if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet USDC balance'); }
   else _swStatus('no smart-wallet USDC balance');
 }
