@@ -2162,14 +2162,6 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
   const dep = getChain(chainKey);
   const chainId = chainKey === "base" ? 8453 : (chainKey === "robinhood" ? 4663 : 1);
   const meta = await getTokenMeta(token, chainKey);
-  // sellAll passes a full-precision decimal STRING (formatUnits of the raw
-  // on-chain balance) — parseUnits recovers it exactly. A typed amount
-  // (plain number) keeps the old math; String(number) can hit exponential
-  // notation ("1e-7") that parseUnits rejects, same reasoning as
-  // executeSniperSell's identical branch (sniper-extras.mjs).
-  const amountIn = typeof amountHuman === "string"
-    ? parseUnits(amountHuman, Number(meta.decimals))
-    : BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
 
   // Curve coin: sellCurveCoin assembles the UR payload (commands 0x060c0f).
   const { getCurveCoinState, getImdPerEth } = await import("./dip-swap.mjs");
@@ -2182,40 +2174,36 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
     // coins are trusted (this launchpad's tokens can't be honeypots), and
     // the probe's slot-0 assumption produced a false positive on VANGUARD
     // (a live eth_call of this exact sellCurveCoin path simulated clean, and
-    // the wallet had already sold half its VANGUARD position externally via
-    // the launchpad for real ETH). launchpad-token.mjs's probe helpers are
+    // the wallet had already sold half its position externally via the
+    // launchpad for real ETH). launchpad-token.mjs's probe helpers are
     // unused now but left in place in case a non-launchpad case needs them.
+    // amountHuman: string (sellAll, full precision) → parseUnits; number
+    // (typed) → the legacy float math. Same contract as executeSniperSell.
+    const amountIn = typeof amountHuman === "string"
+      ? parseUnits(amountHuman, Number(meta.decimals))
+      : BigInt(Math.round(Number(amountHuman) * 10 ** Number(meta.decimals)));
     const { buildDirectCurveSell } = await import("./direct-sell.mjs");
     const built = await buildDirectCurveSell({ tokenAddress: token, coinAmountWei: amountIn, sellerAddress: uid, slippagePct, chainKey, curveState, imdPerEth, universalRouter: dep.v4.universalRouter });
     return { directSign: { to: built.to, data: built.data, value: "0", chainId, gas: built.gas, isApproval: built.isApproval } };
   }
 
-  // AMM venues: resolve the venue, then build via the exported V4/V3 builders.
-  // Import resolvePoolOverride from dip-swap (its defining module) — sniper-extras
-  // only imports it, never re-exports, so `import("./sniper-extras.mjs").resolvePoolOverride`
-  // was undefined → "poolOverride/resolvePoolOverride is not a function" on
-  // every watcher exit with a saved pool (found live 2026-09-22, IMD sell).
-  const chosen = watcher.pool_address
-    ? await (async () => { const { resolvePoolOverride } = await import("./dip-swap.mjs"); return resolvePoolOverride(token, watcher.pool_address, chainKey); })()
-    : null;
-  if (chosen?.kind === "v4" || (!chosen && watcher.pool_address == null)) {
-    // V4 pool (saved or auto-resolved)
-    const pool = chosen ? {
-      dex: "V4", fee: chosen.fee, tickSpacing: chosen.tickSpacing, hooks: chosen.hooks,
-      currency0: chosen.currency0, currency1: chosen.currency1,
-    } : await (async () => {
-      const { findBestV4Pool } = await import("./dip-swap.mjs");
-      return await findBestV4Pool(token, chainKey);
-    })();
-    // buildDirectV4Sell wraps executeV4Sell's Permit2 allowance chain via a
-    // capture-signer — stages approve→approve→swap across repeated calls
-    // instead of sending the raw swap (which reverts TRANSFER_FROM_FAILED
-    // whenever the wallet hasn't already max-approved Permit2 for this token).
-    const { buildDirectV4Sell } = await import("./direct-sell.mjs");
-    const built = await buildDirectV4Sell({ chainKey, tokenAddress: token, amountIn, slippagePct, pool, sellerAddress: uid });
-    return { directSign: { to: built.to, data: built.data, value: built.value, chainId, isApproval: built.isApproval } };
-  }
-  throw new Error("no direct-sign venue for this token — use the Sniper page sell");
+  // AMM venues: delegate to the SAME dispatcher the Sniper page uses
+  // (executeSniperSell via capture-signer). The old code here hardcoded
+  // V4-first with no quote test — and produced reverting UR calldata for IMD
+  // (live 2026-09-23: exit swaps failed while the same token sold cleanly
+  // through the V3 USDC pool via exactInputSingle). resolveSellVenue ranks
+  // V4 / V3 dollar-quoted / V3 WETH-quoted by liquidity, quote-tests V4
+  // candidates and demotes ones whose quoter reverts — all reuse, no drift.
+  const { buildDirectSniperSell } = await import("./direct-sell.mjs");
+  const built = await buildDirectSniperSell({
+    chainKey,
+    tokenAddress: token,
+    amountHuman,
+    slippagePct,
+    pool: watcher.pool_address ?? null, // saved V4 poolId / V3 address beats Dexscreener
+    sellerAddress: uid,
+  });
+  return { directSign: { to: built.to, data: built.data, value: built.value, chainId, isApproval: built.isApproval } };
 }
 
 if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POST") {
