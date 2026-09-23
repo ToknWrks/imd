@@ -515,7 +515,15 @@ export async function executeV4Sell({ signer, chainKey, tokenAddress, amountIn, 
     await waitForTxReceipt(chainKey, tx); // approval must be mined before the swap can pull
   }
   const nowSec = BigInt(Math.floor(Date.now() / 1000));
-  if (p2.amount < amountIn || BigInt(p2.expiration ?? 0) <= nowSec) {
+  // viem returns the Permit2 allowance tuple POSITIONALLY ([amount, expiration,
+  // nonce]) — res.amount/res.expiration are UNDEFINED on the object shape, so
+  // `p2.amount < amountIn` was always true and the Permit2 approve was
+  // re-captured on EVERY direct-sign attempt: the user signed approve after
+  // approve and the swap never came (found live 2026-09-22, IMD watcher exit —
+  // 4 approvals, never sold; same lesson as curve-buy.mjs 77aa269).
+  const p2amt = BigInt(Array.isArray(p2) ? (p2[0] ?? 0n) : (p2?.amount ?? 0n));
+  const p2exp = BigInt(Array.isArray(p2) ? (p2[1] ?? 0n) : (p2?.expiration ?? 0n));
+  if (p2amt < amountIn || p2exp <= nowSec) {
     const tx = await signer.callContract({ address: PERMIT2, abi: PERMIT2_ABI, functionName: "approve", args: [token, n.v4Router, MAX_UINT160, MAX_UINT48] });
     await waitForTxReceipt(chainKey, tx);
   }
