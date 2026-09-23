@@ -2674,6 +2674,78 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
         }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
+    // USDC sweep OUT of the session SCW → the user's EOA (2026-09-24). The
+    // sells executed in autonomy mode pay proceeds into the SCW; this moves
+    // them back so the user can trade on any DEX from their browser wallet.
+    // Server-executed via resolveSignerUser (the same per-user AA signer the
+    // unattended engines use) — requires autonomy mode by design.
+    if (url === "/api/smart-wallet/sweep-usd" && method === "POST") {
+      try {
+        const uid = sessionAddress(req);
+        const body = JSON.parse(await readBody() || "{}");
+        const chainKey = body.chain || "ethereum";
+        const { getUser } = await import("./users.mjs");
+        const u = getUser(uid);
+        if (u?.signer_mode !== "autonomy") {
+          return json({ ok: false, error: "USDC sweep runs on the session signer — switch Settings → Trading mode to Autonomy first" });
+        }
+        const signer = await resolveSignerUser(uid, chainKey);
+        const dep = getChain(chainKey);
+        const token = getAddress(dep.dollar);
+        const dec = dep.dollarDecimals ?? 6;
+        const { httpClient } = await import("./chains.mjs");
+        const pub = httpClient(chainKey);
+        const scw = getAddress(signer.address);
+        const balRaw = await pub.readContract({ address: token, abi: parseAbi(["function balanceOf(address) view returns (uint256)"]), functionName: "balanceOf", args: [scw] });
+        const amt = Number(body.amount);
+        let raw;
+        if (!Number.isFinite(amt) || amt <= 0 || parseUnits(String(amt), dec) >= balRaw) {
+          if (balRaw === 0n) return json({ ok: false, error: "smart wallet holds no USDC" });
+          raw = balRaw; // sweep everything
+        } else {
+          raw = parseUnits(String(amt), dec);
+        }
+        const txHash = await signer.callContract({
+          address: token,
+          abi: parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]),
+          functionName: "transfer",
+          args: [getAddress(uid), raw],
+        });
+        console.log(`[sweep-usd] ${uid}: swept ${Number(raw) / 10 ** dec} USDC from ${scw} | tx ${txHash}`);
+        return json({ ok: true, txHash, swept: Number(raw) / 10 ** dec, scwAddress: scw });
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
+    // USDC move IN (EOA → SCW): browser direct-sign — a plain USDC.transfer signed
+    // by the user's EOA. No server key. Returns the directSign tx like every
+    // other staged trade.
+    if (url === "/api/smart-wallet/usdc-in" && method === "POST") {
+      try {
+        const uid = sessionAddress(req);
+        const body = JSON.parse(await readBody() || "{}");
+        const chainKey = body.chain || "ethereum";
+        const dep = getChain(chainKey);
+        const token = getAddress(dep.dollar);
+        const dec = dep.dollarDecimals ?? 6;
+        const { getSmartAccountClient } = await import("./smart-account.mjs");
+        // The SCW to fund: the session signer's address (per-user AA wallet).
+        const signer = await resolveSignerUser(uid, chainKey);
+        const scwAddress = getAddress(signer.address);
+        const amt = Number(body.amount);
+        if (!Number.isFinite(amt) || amt <= 0) return json({ ok: false, error: "enter a positive amount" });
+        const data = encodeFunctionData({
+          abi: parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]),
+          functionName: "transfer",
+          args: [scwAddress, parseUnits(String(amt), dec)],
+        });
+        return json({
+          ok: true,
+          directSign: { to: token, data, value: "0", chainId: 1 },
+          scwAddress,
+          asset: "usdc",
+          amount: amt,
+        });
+      } catch (e) { return json({ ok: false, error: e.message }); }
+    }
     // v2 autonomy grant (plan 2026-09-20): quote the installValidation UO for
     // the browser owner to sign, then flip the record once it lands.
     if (url === "/api/smart-wallet/grant" && method === "POST") {

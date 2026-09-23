@@ -301,6 +301,9 @@ function renderSmartWalletSection(){
   h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
   h+=swHintRow('swInEthHint');
   // USD row removed (2026-09-19): the platform no longer pays in dollars.
+  // USDC move-in row restored (2026-09-24): browser-signed USDC.transfer to the SCW.
+  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(owner.usd!=null?owner.usd:(owner.dollar!=null?owner.dollar:null))+'</span></div>';
+  h+='<div class="sw-move-row"><input id="swInUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','usdc')" + '">Fund \u2192</button></div>';
   // IMD row (only when the chain has IMD configured)
   if(s.imdPerEth!==undefined){
     h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(owner.imd)+'</span>'+usd(owner.imd!=null&&imdUsd>0?owner.imd*imdUsd:null)+'</div>';
@@ -318,6 +321,10 @@ function renderSmartWalletSection(){
   h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
   h+=swHintRow('swOutEthHint');
   // USD row removed (2026-09-19): the platform no longer pays in dollars.
+  // USDC row restored (2026-09-24): autonomy sells pay proceeds into the SCW
+  // as USDC; the sweep-usd route moves it back to the EOA on demand.
+  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(scw.usd!=null?scw.usd:(scw.dollar!=null?scw.dollar:null))+'</span></div>';
+  h+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillUsdMax()" title="Sweep the entire USDC balance">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','usdc')" + '">\u2190 Move out</button></div>';
   // IMD row on the SCW card too (session-key signed UO move-out)
   if(s.imdPerEth!==undefined){
     h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(scw.imd)+'</span>'+usd(scw.imd!=null&&imdUsd>0?scw.imd*imdUsd:null)+'</div>';
@@ -377,6 +384,20 @@ async function swMove(direction,asset){
     return;
   }
   // Server-signed paths: move-out (session key UO) and legacy in (server signer).
+  // USDC out (2026-09-24): sweep via the per-user session signer — the SCW that
+  // autonomy sells pay into. Direction 'in' keeps the browser-sign funding path.
+  if(asset==='usdc' && direction==='out'){
+    _swStatus('sweeping USDC from the smart wallet…',true);
+    try{
+      var r=await fetch('/api/smart-wallet/sweep-usd',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({chain:_swState.chain,amount:amount})});
+      var j=await r.json();
+      if(!j.ok)throw new Error(j.error||'failed');
+      _swStatus('\u2713 swept '+(j.swept!=null?j.swept:amount)+' USDC \u2014 tx '+(j.txHash||'').slice(0,10)+'\u2026 reloading\u2026');
+      setTimeout(function(){openWallet();},2200);
+    }catch(e){_swStatus(String(e.message||e).slice(0,160),false,true);}
+    return;
+  }
   _swStatus((direction==='in'?'Moving in\u2026':'Moving out\u2026'),true);
   try{
     var r=await fetch('/api/smart-wallet/move',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -483,6 +504,16 @@ function swFillMaxImd() {
   const b = _swState.scw && _swState.scw.imd;
   if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet IMD balance'); }
   else _swStatus('no smart-wallet IMD balance');
+}
+// MAX for the USDC row: the SCW's full USDC balance — the sweep sends all of it
+// (empty input + MAX both mean "everything" on the server; it clamps to balance).
+function swFillUsdMax() {
+  const inp = document.getElementById('swOutUsd');
+  if (!inp || !_swState) return;
+  const scw = _swState.scw || {};
+  const b = scw.usd != null ? scw.usd : (scw.dollar != null ? scw.dollar : null);
+  if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet USDC balance'); }
+  else _swStatus('no smart-wallet USDC balance — check the balance read (refresh the page)');
 }
 // Fund (move in) an arbitrary token: browser EOA signs the ERC-20 transfer.
 function swMoveTokenIn(tokenAddress, decimals) {
