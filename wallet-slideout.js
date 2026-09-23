@@ -209,6 +209,12 @@ function renderSmartWalletSection(){
     h2+='<div class="sw-card"><div class="sw-card-title">Smart wallet <span class="hint">'+_we(s.custodyLabel||'your EOA owns it')+'</span></div>';
     h2+=_swAddrRow(scw&&scw.address);
     h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw&&scw.eth)+'</span>'+usd(scw&&scw.eth!=null?scw.eth*ethUsd2:null)+'</div>';
+    // USDC row (2026-09-24): autonomy sells pay proceeds into this SCW as
+    // USDC; sweep-usd moves it back to the EOA on demand.
+    h2+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(s.usd)+'</span></div>';
+    if(browserWallet2){
+      h2+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillUsdMaxV2()" title="Sweep the entire USDC balance">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','usdc')" + '">\u2190 Move out</button></div>';
+    }
     // Move-out is browser-signed for v2 (owner EOA sends directly)
     if(browserWallet2){
       h2+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMaxV2()" title="Fill the full balance — a direct sweep takes no gas from the wallet, so 100% goes out">MAX</button><button class="sw-btn alt" onclick="' + "swMoveOutBrowser('eth')" + '">\u2190 Move out</button></div>';
@@ -497,14 +503,6 @@ function swFillMaxToken(tokenAddress, decimals) {
   if (v != null && v > 0) { inp.value = v; _swStatus('full smart-wallet balance of ' + (t.symbol || 'token')); }
   else _swStatus('no smart-wallet balance of ' + (t && t.symbol || 'this token'));
 }
-// MAX for the IMD row (configured-but-unwatched path).
-function swFillMaxImd() {
-  const inp = document.getElementById('swOutImd');
-  if (!inp || !_swState) return;
-  const b = _swState.scw && _swState.scw.imd;
-  if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet IMD balance'); }
-  else _swStatus('no smart-wallet IMD balance');
-}
 // MAX for the USDC row: the SCW's full USDC balance — the sweep sends all of it
 // (empty input + MAX both mean "everything" on the server; it clamps to balance).
 function swFillUsdMax() {
@@ -514,6 +512,22 @@ function swFillUsdMax() {
   const b = scw.usd != null ? scw.usd : (scw.dollar != null ? scw.dollar : null);
   if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet USDC balance'); }
   else _swStatus('no smart-wallet USDC balance — check the balance read (refresh the page)');
+}
+// v2 variant: the v2 status is FLAT (s.usd), not nested under scw.
+function swFillUsdMaxV2() {
+  const inp = document.getElementById('swOutUsd');
+  if (!inp || !_swState) return;
+  const b = _swState.usd;
+  if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet USDC balance'); }
+  else _swStatus('no smart-wallet USDC balance');
+}
+// MAX for the IMD row (configured-but-unwatched path).
+function swFillMaxImd() {
+  const inp = document.getElementById('swOutImd');
+  if (!inp || !_swState) return;
+  const b = _swState.scw && _swState.scw.imd;
+  if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet IMD balance'); }
+  else _swStatus('no smart-wallet IMD balance');
 }
 // Fund (move in) an arbitrary token: browser EOA signs the ERC-20 transfer.
 function swMoveTokenIn(tokenAddress, decimals) {

@@ -1141,6 +1141,8 @@ export async function getUserWalletStatus(userId, chainKey = "ethereum") {
     let eth = null, usd = null, deployed = false;
     try {
       eth = Number(await pub.getBalance({ address })) / 1e18;
+      usd = await getErc20Balance(dep.dollar, address, chainKey).catch(() => null);
+      usd = usd != null ? Number(usd) / 10 ** (dep.dollarDecimals ?? 6) : null;
       deployed = (await pub.getCode({ address }).catch(() => "0x")) !== "0x";
     } catch { /* offline — still show the address */ }
     return {
@@ -1149,6 +1151,8 @@ export async function getUserWalletStatus(userId, chainKey = "ethereum") {
       ownerEoa: getAddress(rec.ownerEoa),
       signerMode: user.signer_mode || "copilot",
       address, eth, usd, deployed,
+      dollarToken: dep.dollar,
+      dollarDecimals: dep.dollarDecimals ?? 6,
     };
   }
   // Unified resolver (2026-09-18): registry first, users-table legacy
