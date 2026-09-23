@@ -22,6 +22,8 @@ const wn = (x) => BigInt(x).toString(16).padStart(64, "0");
 const addr = (a) => getAddress(a).slice(2).toLowerCase().padStart(64, "0");
 
 // From the UI's working sell (IMD/ETH hooked pool):
+// IMD token (the launchpad's reserve asset) — the only token this sell path supports.
+export const IMD = "0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7";
 export const HOOKED_POOL = {
   poolId: "0x415829f72e9f54531c26eae76f107618540e898a45d6ae35959e143f5faca704",
   fee: 10000,
@@ -79,6 +81,22 @@ export function permitTypedData({ tokenAddress, sellerAddress, spender = HOOK_PE
       sigDeadline: deadline.toString(),
     },
   };
+}
+
+/**
+ * Read the current Permit2 nonce for (owner, token, spender) — required to
+ * build the typed data the wallet signs. Free on-chain read.
+ */
+export async function getPermit2Nonce({ ownerAddress, tokenAddress, chainKey = "ethereum" }) {
+  const { httpClient } = await import("./chains.mjs");
+  const c = httpClient(chainKey);
+  const result = await c.readContract({
+    address: getAddress(PERMIT2),
+    abi: parseAbi(["function allowance(address,address,address) view returns (uint160 amount, uint48 expiration, uint48 nonce)"]),
+    functionName: "allowance",
+    args: [getAddress(ownerAddress), getAddress(tokenAddress), getAddress(HOOK_PERMIT_SPENDER)],
+  });
+  return BigInt(result[2]);
 }
 
 /**
