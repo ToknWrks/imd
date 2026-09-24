@@ -80,12 +80,13 @@ const SK_CONST = 'const SK = "0x" + "1".repeat(64);';
 STUBS["registry-v2.stub.mjs"] = `
     import { privateKeyToAccount } from "viem/accounts";
     ${SK_CONST}
-    // v1 record preloaded for the activate test's probe user.
+    // v2 record preloaded for the activate test's probe user (v1 removed).
     const store = {
       ${JSON.stringify("0x" + "2".repeat(40))}: {
-        scwAddress: ${JSON.stringify("0x" + "9".repeat(40))},
-        sessionKeyAddress: privateKeyToAccount(SK).address,
-        sessionKeyEnc: "enc:" + SK,
+        schema: 2,
+        scwAddress: ${JSON.stringify("0x" + "d".repeat(40))},
+        ownerEoa: ${JSON.stringify("0x" + "a".repeat(40))},
+        salt: 0, sessionKeyEnc: null, sessionKeyAddress: null, grantStatus: "none",
       },
     };
     export function isV2Record(rec) { return Boolean(rec && rec.schema === 2 && rec.ownerEoa); }
@@ -127,21 +128,11 @@ const CHILD_SNIPPET = `
     if (e instanceof ReferenceError || /is not defined/.test(String(e))) { console.error("REFERENCE_ERROR:" + e.message); process.exit(2); }
     console.error("OTHER_ERROR:" + e.message); process.exit(3);
   }
-  // Correct contract: the function refuses to send a deploy the gas key can't
-  // afford, and names the gas-payer address — never a silent no-op.
-  if (r.needsGas) {
-    if (r.gasPayer !== "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A") { console.error("WRONG_GAS_PAYER:" + r.gasPayer); process.exit(9); }
-    if (r.gasPayer === "0x" + "9".repeat(40)) { console.error("GAS_PAYER_IS_SCW"); process.exit(10); }
-    console.log("ACTIVATE_NEEDS_GAS_OK");
-    process.exit(0);
-  }
-  if (!r.ok || r.browserSign !== true) { console.error("BAD_PAYLOAD:" + JSON.stringify(r).slice(0, 200)); process.exit(4); }
+  if (!r.ok || r.browserSign !== true || r.schema !== 2) { console.error("BAD_PAYLOAD:" + JSON.stringify(r).slice(0, 200)); process.exit(4); }
   if (!/^0x[0-9a-fA-F]{40}$/.test(r.factory) || !/^0x[0-9a-fA-F]{40}$/.test(r.owner)) { console.error("BAD_ADDR:" + JSON.stringify(r).slice(0, 200)); process.exit(5); }
-  // Owner MUST be the session-key EOA derived from the registry key — never
-  // the SCW address itself (self-owned = bricked). The stub key's EOA is
-  // 0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A (deterministic key 0x111…1).
-  if (r.owner !== "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A") { console.error("WRONG_OWNER:" + r.owner); process.exit(7); }
-  if (r.owner === r.scwAddress) { console.error("SELF_OWNED"); process.exit(8); }
+  // Owner MUST be the user's EOA from the v2 record — never the SCW itself.
+  if (r.owner.toLowerCase() !== from.toLowerCase()) { console.error("WRONG_OWNER:" + r.owner); process.exit(7); }
+  if (r.owner.toLowerCase() === r.scwAddress.toLowerCase()) { console.error("SELF_OWNED"); process.exit(8); }
   if (!/^0x[a-f0-9]+$/i.test(r.callData) || r.callData.length < 10) { console.error("BAD_CALLDATA"); process.exit(6); }
   console.log("ACTIVATE_BROWSER_PATH_OK");
 `;
@@ -175,5 +166,5 @@ test("activateSmartWallet browser path returns a signable payload (no ReferenceE
     "--import", "./scripts/test-loader.mjs",
     SNIPPET_PATH,
   ], { encoding: "utf8", env: { ...process.env, TEST_STUB_DIR: "stubs-activate" } });
-  assert.match(out, /(ACTIVATE_NEEDS_GAS_OK|ACTIVATE_BROWSER_PATH_OK)/);
+  assert.match(out, /ACTIVATE_BROWSER_PATH_OK/);
 });

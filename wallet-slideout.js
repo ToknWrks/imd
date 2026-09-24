@@ -272,85 +272,8 @@ function renderSmartWalletSection(){
     document.getElementById('smartWalletSection').innerHTML=h2;
     return;
   }
-  // NO SESSION KEY (2026-09-19, v1 wallets only): never show a smart-wallet card with a
-  // fundable address — the only wallet the server could previously show here
-  // was a global env burner that belongs to nobody. Co-pilot users see an
-  // explicit explanation + path to autonomy instead.
-  if(!s.hasSessionKey){
-    var ethUsd0=s.ethUsd||0;
-    var h0='';
-    h0+='<div class="sw-head">Smart wallet <span class="hint">not set up</span></div>';
-    h0+='<div class="sw-card" style="grid-column:1/-1">';
-    h0+='<p class="hint" style="margin:0 0 0.6rem"><b>You are in Co-pilot mode</b> — every trade waits for your approval in the browser, and your connected wallet (above) signs it. The server holds no keys for you: that is the safest configuration.</p>';
-    h0+='<p class="hint" style="margin:0 0 0.6rem">Want the app to trade automatically (watch dips, buy on schedule without asking)? <b>Generate a session key</b> in <b>Settings \u2192 Signer</b>. That creates YOUR smart wallet \u2014 a new address derived from your personal session key \u2014 which you fund with ETH; the app then trades from it without waiting for you.</p>';
-    h0+='<p class="hint" style="margin:0;color:#e8b661">\u26a0 Only send funds to a smart wallet address shown here AFTER you generate the key \u2014 this screen shows no deposit address until then, on purpose.</p>';
-    h0+='</div>';
-    document.getElementById('smartWalletSection').innerHTML=h0;
-    return;
-  }
-  if(scw.error){
-    document.getElementById('smartWalletSection').innerHTML =
-      '<div class="sw-head">Smart wallet</div><div class="wallet-loading" style="padding:0.75rem 0">'+_we(scw.error)+'</div>';
-    return;
-  }
-  var activated=scw.activated;
-  var ethUsd=s.ethUsd||0;
-  var imdPerEth=s.imdPerEth||0;           // live ETH/IMD pool rate (0 → hints hidden)
-  var imdUsd=imdPerEth>0?ethUsd/imdPerEth:0;   // IMD spot in USD
-  var dsym=s.dollarSymbol||'USDC';
-  var imdSym=s.imdSymbol||'IMD';
-  var browserWallet=_wcAddress||null;   // set by wallet-connect.js (header session)
-  var ownerTitle=browserWallet?'Connected wallet':'Owner wallet';
-  function bal(v,sym){return v==null?'\u2014':_wf(v)+(sym?' '+sym:'');}
-  function usd(v){return v==null?'':'<span class="usd">$'+_wfu(v)+'</span>';}
-  var h='';
-  h+='<div class="sw-head">Smart wallet <span class="hint">'+(activated?'\u2713 deployed':'not deployed')+'</span></div>';
-  h+='<div class="sw-grid">';
-  // ── Connected wallet card (left)
-  h+='<div class="sw-card"><div class="sw-card-title">'+ownerTitle+'</div>';
-  h+=_swAddrRow(browserWallet||owner.address);
-  // ETH row
-  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(owner.eth)+'</span>'+usd(owner.eth!=null?owner.eth*ethUsd:null)+'</div>';
-  h+='<div class="sw-move-row"><input id="swInEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swInEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','eth')" + '">Fund \u2192</button></div>';
-  h+=swHintRow('swInEthHint');
-  // USD row removed (2026-09-19): the platform no longer pays in dollars.
-  // USDC move-in row restored (2026-09-24): browser-signed USDC.transfer to the SCW.
-  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(owner.usd!=null?owner.usd:(owner.dollar!=null?owner.dollar:null))+'</span></div>';
-  h+='<div class="sw-move-row"><input id="swInUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn" onclick="' + "swMove('in','usdc')" + '">Fund \u2192</button></div>';
-  // IMD row (only when the chain has IMD configured)
-  if(s.imdPerEth!==undefined){
-    h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(owner.imd)+'</span>'+usd(owner.imd!=null&&imdUsd>0?owner.imd*imdUsd:null)+'</div>';
-    h+='<div class="sw-move-row"><input id="swInImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swInImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn" onclick="' + "swMove('in','imd')" + '">Fund \u2192</button></div>';
-    h+=swHintRow('swInImdHint');
-  }
-  if(browserWallet){
-    h+='<div class="hint" style="margin-top:0.4rem;font-size:0.68rem">Funding signs in your browser wallet \u2014 keys never leave it.</div>';
-  }
-  h+='</div>';
-  // ── SCW card (right)
-  h+='<div class="sw-card"><div class="sw-card-title">Smart wallet <span class="hint">AA</span></div>';
-  h+=_swAddrRow(scw.address);
-  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#627eea">&Xi;</span><span>ETH</span><span class="amount">'+bal(scw.eth)+'</span>'+usd(scw.eth!=null?scw.eth*ethUsd:null)+'</div>';
-  h+='<div class="sw-move-row"><input id="swOutEth" type="number" step="0.0001" min="0" placeholder="0.00" oninput="swHint(&quot;swOutEthHint&quot;,&quot;eth&quot;,this.value)"><button class="sw-btn ghost" onclick="swFillMax()" title="Fill the maximum sendable (balance minus this transaction gas)">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','eth')" + '">\u2190 Move out</button></div>';
-  h+=swHintRow('swOutEthHint');
-  // USD row removed (2026-09-19): the platform no longer pays in dollars.
-  // USDC row restored (2026-09-24): autonomy sells pay proceeds into the SCW
-  // as USDC; the sweep-usd route moves it back to the EOA on demand.
-  h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#2775ca;color:#fff">$</span><span>USDC</span><span class="amount">'+bal(scw.usd!=null?scw.usd:(scw.dollar!=null?scw.dollar:null))+'</span></div>';
-  h+='<div class="sw-move-row"><input id="swOutUsd" type="number" step="0.01" min="0" placeholder="0.00"><button class="sw-btn ghost" onclick="swFillUsdMax()" title="Sweep the entire USDC balance">MAX</button><button class="sw-btn alt" onclick="' + "swMove('out','usdc')" + '">\u2190 Move out</button></div>';
-  // IMD row on the SCW card too (session-key signed UO move-out)
-  if(s.imdPerEth!==undefined){
-    h+='<div class="sw-asset"><span class="sw-token-icon" style="background:#e8b661;color:#0b0d10">'+_we(imdSym)+'</span><span>'+_we(imdSym)+'</span><span class="amount">'+bal(scw.imd)+'</span>'+usd(scw.imd!=null&&imdUsd>0?scw.imd*imdUsd:null)+'</div>';
-    h+='<div class="sw-move-row"><input id="swOutImd" type="number" step="1" min="0" placeholder="0.00" oninput="swHint(&quot;swOutImdHint&quot;,&quot;imd&quot;,this.value)"><button class="sw-btn alt" onclick="' + "swMove('out','imd')" + '">\u2190 Move out</button></div>';
-    h+=swHintRow('swOutImdHint');
-  }
-  h+='<div class="sw-status" id="swStatus"></div>';
-  h+='<div style="margin-top:0.6rem">';
-  if(!activated){h+='<button class="sw-btn activate" onclick="swActivate()">Activate smart wallet</button>';}
-  else{h+='<span class="hint">\u2713 deployed on-chain \u2014 ready for buys</span>';}
-  h+='</div></div>';
-  h+='</div>';
-  document.getElementById('smartWalletSection').innerHTML=h;
+  // v1 wallets were removed (2026-09-24): every account is schema 2.
+  document.getElementById('smartWalletSection').innerHTML='<div class="sw-head">Smart wallet</div><div class="wallet-loading" style="padding:0.75rem 0">No smart wallet registered for this account \u2014 sign in again to create it.</div>';
 }
 async function swMove(direction,asset){
   var input=document.getElementById((direction==='in'?'swIn':'swOut')+(asset==='eth'?'Eth':(asset==='imd'?'Imd':'Usd')));
@@ -396,7 +319,6 @@ async function swMove(direction,asset){
     }
     return;
   }
-  // Server-signed paths: move-out (session key UO) and legacy in (server signer).
   // USDC out (2026-09-24): sweep via the per-user session signer — the SCW that
   // autonomy sells pay into. Direction 'in' keeps the browser-sign funding path.
   if(asset==='usdc' && direction==='out'){
@@ -411,51 +333,10 @@ async function swMove(direction,asset){
     }catch(e){_swStatus(String(e.message||e).slice(0,160),false,true);}
     return;
   }
-  _swStatus((direction==='in'?'Moving in\u2026':'Moving out\u2026'),true);
-  try{
-    var r=await fetch('/api/smart-wallet/move',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({direction:direction,asset:asset,amount:amount,chain:_swState.chain})});
-    var j=await r.json();
-    if(!j.ok)throw new Error(j.error||'failed');
-    _swStatus('\u2713 sent \u2014 tx '+(j.txHash||'').slice(0,10)+'\u2026 reloading\u2026');
-    setTimeout(function(){openWallet();},1800);
-  }catch(e){_swStatus(String(e.message||e).slice(0,160),false,true);}
+  _swStatus('this move is signed in your browser wallet \u2014 use the Fund / Move out buttons on the smart wallet card',false,true);
 }
 function chainIdHexFor(chain){
   return chain==='base'?'0x2105':(chain==='robinhood'?'0x1237':'0x1');
-}
-// Fund the activation gas key from the browser wallet, then automatically
-// retry the (server-side) deploy — one user action, no address copying.
-async function swFundGas(){
-  if(!window.ethereum||!_swState||!_swState.gasPayer){_swStatus('gas key unknown — click Activate first',false,true);return;}
-  var gasPayer=_swState.gasPayer;
-  var amount=0.002;
-  _swStatus('signing the gas funding send in your wallet…',true);
-  try{
-    var accts=await window.ethereum.request({method:'eth_requestAccounts'});
-    var from=accts&&accts[0];
-    if(!from){_swStatus('no account active in your wallet',false,true);return;}
-    var wei='0x'+BigInt(Math.round(amount*1e18)).toString(16);
-    var txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:from,to:gasPayer,value:wei,chainId:chainIdHexFor(_swState.chain)}]});
-    _swStatus('gas funding sent — waiting for it to land, then deploying…',true);
-    // Poll the gas key's balance until it shows the funds (max ~2 min), then
-    // call Activate again — the server does the deploy itself.
-    var deadline=Date.now()+120000;
-    var funded=false;
-    while(Date.now()<deadline){
-      await new Promise(function(res){setTimeout(res,5000);});
-      try{
-        var chk=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState.chain,from:_wcAddress||null,checkOnly:true})});
-        var cj=await chk.json();
-        if(!cj.needsGas){funded=true;break;}
-      }catch{}
-    }
-    if(funded){ await swActivate(); }
-    else { _swStatus('gas funding not confirmed yet — click Activate in a moment',false,true); }
-  }catch(e){
-    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);return;}
-    _swStatus(String(e.message||e).slice(0,160),false,true);
-  }
 }
 // Hint placeholder row (renderSmartWalletSection references this at build time).
 function swHintRow(id){return'<div class="sw-hint" id="'+id+'"></div>';}
@@ -473,22 +354,6 @@ function swHint(id,asset,value){
     if(!(imdPerEth>0)){el.textContent='ETH/IMD rate unavailable';return;}
     var eth=v/imdPerEth;
     el.textContent='\u2248 '+eth.toLocaleString(void 0,{maximumFractionDigits:6})+' ETH'+(ethUsd>0?(' \u00b7 $'+_wfu(eth*ethUsd)+' USD'):'');
-  }
-}
-// Fill the outbound ETH input with the live max-sendable (balance − exact gas cost
-// of the sweep UO). Uses maxSendableEth from the status API when present.
-function swFillMax() {
-  const inp = document.getElementById('swOutEth');
-  if (!inp || !_swState) return;
-  const max = _swState.maxSendableEth;
-  if (max != null && max > 0) {
-    inp.value = max.toFixed(6);
-    _swStatus('max sendable: ' + max.toFixed(6) + ' ETH (balance minus this tx\u2019s gas)');
-  } else {
-    // status didn't provide it (empty account / estimation unavailable) — use balance
-    const b = _swState.scw && _swState.scw.eth;
-    if (b > 0) { inp.value = b.toFixed(6); _swStatus('filled full balance \u2014 the move will clamp to the exact sendable amount'); }
-    else _swStatus('no ETH to move');
   }
 }
 // Fill the outbound ETH input with the FULL SCW balance (v2 direct sweep):
@@ -509,16 +374,6 @@ function swFillMaxToken(tokenAddress, decimals) {
   const v = t && t.scwBalance != null ? t.scwBalance : null;
   if (v != null && v > 0) { inp.value = v; _swStatus('full smart-wallet balance of ' + (t.symbol || 'token')); }
   else _swStatus('no smart-wallet balance of ' + (t && t.symbol || 'this token'));
-}
-// MAX for the USDC row: the SCW's full USDC balance — the sweep sends all of it
-// (empty input + MAX both mean "everything" on the server; it clamps to balance).
-function swFillUsdMax() {
-  const inp = document.getElementById('swOutUsd');
-  if (!inp || !_swState) return;
-  const scw = _swState.scw || {};
-  const b = scw.usd != null ? scw.usd : (scw.dollar != null ? scw.dollar : null);
-  if (b != null && b > 0) { inp.value = b; _swStatus('full smart-wallet USDC balance'); }
-  else _swStatus('no smart-wallet USDC balance — check the balance read (refresh the page)');
 }
 // v2 variant: the v2 status nests the SCW balance at scw.usd.
 function swFillUsdMaxV2() {
@@ -592,50 +447,6 @@ function _swMoveTokenSweep(tokenAddress, decimals, amount) {
 function _swStatus(msg,busy,err){
   var el=document.getElementById('swStatus'); if(!el)return;
   el.textContent=msg||''; el.style.color=err?'#f87171':(busy?'rgba(255,255,255,0.6)':'#4ade80');
-}
-async function swActivate(){
-  var btn=event&&event.target;
-  if(btn){btn.disabled=true;btn.textContent='Activating…';}
-  // The deploy is signed SERVER-SIDE with the session key (msg.sender must be
-  // the account owner — the factory silently no-ops for anyone else). Your
-  // browser wallet is never prompted; the gas-key EOA pays and may need funding.
-  _swStatus('preparing deploy…',true);
-  try{
-    var r=await fetch('/api/smart-wallet/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:_swState?_swState.chain:'ethereum',from:_wcAddress||null})});
-    var j=await r.json();
-    if(j.needsGas){
-      // The deploy is signed by the wallet's own gas key (msg.sender must be
-      // the account owner or the factory silently no-ops). ONE button chains
-      // both steps: browser-signs the funding send, then auto-retries the
-      // (server-side) deploy — no manual address copying, no extra inputs.
-      _swState.gasPayer=j.gasPayer;   // remember it for swFundGas()
-      if(btn){btn.disabled=false;btn.textContent='Fund & activate';}
-      _swStatus('Activation needs deploy gas in the wallet\u2019s gas key (msg.sender = owner, else the factory no-ops). Click \u201cFund & activate\u201d and sign the \u2248'+_wfu(j.suggestedGasEth||0.002)+' ETH send — the deploy follows automatically.');
-      var host=document.getElementById('smartWalletSection');
-      if(host && j.gasPayer){
-        var old=document.getElementById('gasKeyNote');
-        if(old) old.remove();
-        var note=document.createElement('div');
-        note.id='gasKeyNote';
-        note.className='sw-card';note.style.marginTop='0.6rem';
-        note.innerHTML='<b style="color:#e8b661">Fund &amp; activate</b>'+
-          '<div class="sw-move-row" style="margin-top:0.45rem"><button class="sw-btn" onclick="swFundGas()">Sign \u2248'+_wfu(j.suggestedGasEth||0.002)+' ETH \u2192 gas key, then auto-deploy</button></div>'+
-          '<div class="hint" style="margin-top:0.25rem">Gas-key '+_swAddr(j.gasPayer)+' (balance '+_wfu(j.gasPayerBalanceEth)+' ETH) signs the deploy because the factory requires msg.sender = owner. Leftover gas stays as the wallet\u2019s operating float.</div>';
-        var grid=host.querySelector('.sw-grid');
-        if(grid){host.insertBefore(note,grid);}else{host.appendChild(note);}
-      }
-      return;
-    }
-    if(!j.ok)throw new Error(j.error||'deploy failed');
-    // The deploy is signed SERVER-SIDE with the session key (owner-only
-    // factory). The browser wallet is never prompted for activation.
-    _swStatus(j.alreadyDeployed?'\u2713 already deployed':'\u2713 deploy sent — tx '+(j.txHash||'').slice(0,10)+'…');
-    setTimeout(function(){openWallet();},2500);
-  }catch(e){
-    if(e&&e.code===4001){_swStatus('rejected in wallet',false,true);}
-    else _swStatus(String(e.message||e).slice(0,180),false,true);
-    if(btn){btn.disabled=false;btn.textContent='Activate smart wallet';}
-  }
 }
 function closeWallet(){document.getElementById('walletOverlay').classList.remove('open');}
 // ── v2 (user-EOA-owned) actions ──────────────────────────────────────────────

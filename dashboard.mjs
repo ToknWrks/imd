@@ -67,7 +67,7 @@ import { APPKIT_SCRIPT } from "./wallet-appkit.js";
 import { addSseClient, listPending, listRecent, getRequest, resolveRequest, declineRequest, isCopilotActive, pendingCount } from "./copilot.mjs";
 import { handleAuth, sessionAddress } from "./auth.mjs";
 import { walletApiHandler } from "./wallet-api.mjs";
-import { activateSmartWallet, moveFunds, generateUserSessionKey, getUserWalletStatus } from "./smart-wallet-api.mjs";
+import { activateSmartWallet, getUserWalletStatus } from "./smart-wallet-api.mjs";
 import { getUser, setUserField } from "./users.mjs";
 import { CHAIN_KEYS, getChain, getEthUsdPriceFor } from "./chains.mjs";
 import { getMarketOverview } from "./zooch-data.mjs";
@@ -226,7 +226,7 @@ async function isSignerConfigured(userId = null) {
     const status = await vaultStatus(getEnvValue("VULTISIG_PASS")).catch(() => ({ exists: false }));
     return !!(status.exists && status.address && status.isDeviceShare !== false);
   }
-  return !!getEnvValue("AGENT_PRIVATE_KEY") || getEnvValue("SMART_ACCOUNT_ACTIVE") === "true";
+  return !!getEnvValue("AGENT_PRIVATE_KEY");
 }
 
 /** Compute and persist a token's wallet-position snapshot (balance, USD value, cost basis). */
@@ -1071,34 +1071,17 @@ async function settingsPage(vaultMsg = "", userId = null) {
       mmAddress = privateKeyToAccount(mmPk.startsWith("0x") ? mmPk : "0x" + mmPk).address;
     } catch { mmAddress = ""; }
   }
-  // Smart-account mode state: session key presence + derived SCW address.
-  const smartActive = getEnvValue("SMART_ACCOUNT_ACTIVE") === "true";
   const copilotOn = isCopilotActive();
-  const copilotConnected = userId; // your own login address IS the co-pilot wallet now
-  // Per-user signer state (Phase 2): mode + key presence from the users table.
+  // Per-user signer state: mode from the users table, wallet from the v2 registry.
   let userMode = "copilot";
-  let userHasSessionKey = false;
-  let userV2 = null; // v2 registry record (user-EOA-owned wallet), if any
+  let userV2 = null; // v2 registry record (user-EOA-owned wallet)
   if (userId) {
     const { getUser } = await import("./users.mjs");
     const u = getUser(userId);
-    if (u) { userMode = u.signer_mode || "copilot"; userHasSessionKey = !!u.session_key_enc; }
+    if (u) userMode = u.signer_mode || "copilot";
     const { getWalletRecord, isV2Record } = await import("./smart-wallet-registry.mjs");
     const rec = getWalletRecord(userId);
     if (rec && isV2Record(rec)) userV2 = rec;
-  }
-  const aaSessionKey = getEnvValue("AA_SESSION_KEY");
-  let smartAddress = "";
-  let smartModeNote = "";
-  if (aaSessionKey) {
-    try {
-      const { buildSmartAccountSigner } = await import("./smart-account.mjs");
-      process.env.SMART_ACCOUNT_ACTIVE = "true";   // ensure the branch engages for derivation
-      const s = await buildSmartAccountSigner("ethereum");
-      smartAddress = s.address;
-    } catch (e) {
-      smartModeNote = String(e.message).slice(0, 140);
-    }
   }
 
   return shell("Settings", `
@@ -1112,24 +1095,7 @@ async function settingsPage(vaultMsg = "", userId = null) {
         <p class="hint">Custody: the private keys in your browser extension are the on-chain owner. The server holds nothing until you grant automation — and even then the granted session key is an operator you can revoke, never the owner. There is <b>no session key to generate or back up</b>.</p>
         <div id="userWalletBox"><p class="hint">Loading your trading wallet…</p></div>
         <p class="hint" style="margin-top:0.8rem">Enable/disable automated trading from the <b>wallet slideout</b> (the wallet button in the header) — that is where the session-key operator is granted, in one browser-signed transaction. Pick your trading mode in the <b>Trading mode</b> card below.</p>
-      ` : `
-      <p class="hint"><b>Default:</b> the wallet connected in the header (${copilotConnected ? `<code>${copilotConnected.slice(0, 6)}…${copilotConnected.slice(-4)}</code>` : "none connected yet — click Connect wallet above"}). In <b>Co-pilot</b> mode it approves every trade. Optionally generate a <b>smart wallet</b> below for autonomous trading — its session key is stored encrypted on this server, and it signs trades without waiting for you.</p>
-      <div id="smartFields">
-        <div id="userWalletBox">
-          <p class="hint">Loading your trading wallet…</p>
-        </div>
-        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-          <button onclick="generateUserKey(this)">${"Generate a session key"}</button>
-          <button class="secondary" onclick="regenerateUserKey(this)" title="Derives a NEW address — sweep funds out of the old one first.">Regenerate key</button>
-        </div>
-        <div id="userKeyGenResult" style="display:none;margin-top:0.6rem;padding:0.6rem 0.7rem;background:rgba(74,222,128,0.07);border:1px solid rgba(74,222,128,0.3);border-radius:4px">
-          <p class="hint" style="margin:0 0 0.4rem"><b style="color:#4ade80">Session key generated and stored (encrypted).</b> Back it up NOW — it is shown only once:</p>
-          <code id="userGenKey" style="display:block;word-break:break-all;font-size:0.72rem;color:#e8eaed;user-select:all"></code>
-          <p class="hint" style="margin:0.4rem 0 0">Your smart account: <code id="userGenAddr"></code> — fund it with your plan budget + gas. Same key = same address, always.</p>
-        </div>
-        <p class="hint" style="margin-top:0.8rem">Uses the platform ALCHEMY_API_KEY for the bundler/RPC. Your session key is stored AES-256-GCM encrypted; back it up when shown — it is a wallet seed. Pick your trading mode in the <b>Trading mode</b> card below.</p>
-      </div>
-      `}
+      ` : `<p class="hint">No smart wallet registered for this account yet — sign in again (Connect wallet) to create it.</p>`}
     </div>
 
     <div class="card">
@@ -1142,7 +1108,7 @@ async function settingsPage(vaultMsg = "", userId = null) {
         </select>
       </div>
       ${userV2 && userMode === "autonomy" && userV2.grantStatus !== "granted" ? `<p class="hint" style="color:#f87171">⚠ Autonomy selected but the automation grant has not landed — open the <b>wallet slideout</b> and click "Enable automated trading".</p>` : ""}
-      ${userMode === "autonomy" && (userV2 ? userV2.grantStatus === "granted" : userHasSessionKey) ? `<p class="hint">✓ Autonomy active — trades sign with your smart wallet${userV2 ? "'s session-key operator" : " session key"}.</p>` : ""}
+      ${userMode === "autonomy" && userV2?.grantStatus === "granted" ? `<p class="hint">✓ Autonomy active — trades sign with your smart wallet's session-key operator.</p>` : ""}
       ${userMode === "copilot" ? `<p class="hint">✓ Co-pilot active — keep a dashboard tab open. Requests also appear on the ⏳ badge in the header. Dip/scheduled buys wait up to 5 minutes; everything else 90s.</p>` : ""}
       <button onclick="saveCopilotMode(this)">Save trading mode</button>
     </div>
@@ -1210,75 +1176,21 @@ async function settingsPage(vaultMsg = "", userId = null) {
       // ── Per-user trading wallet (session key + SCW) ──────────────────────
       async function loadUserWallet() {
         const box = document.getElementById('userWalletBox');
+        if (!box) return;
         try {
           const r = await fetch('/api/user/wallet');
           if (r.status === 401) { location.reload(); return; }
           const j = await r.json();
           if (!j.ok) { box.innerHTML = '<p class="hint" style="color:#f87171">' + (j.error || 'unavailable') + '</p>'; return; }
-          // ── v2 wallet (user-EOA-owned): the legacy generate/regenerate
-          // buttons MUST NOT run — they mint a v1 key and RE-DERIVE the SCW
-          // address, orphaning the user's activated, funded wallet (the
-          // 2026-09-20 incident). For v2, autonomy is granted in the wallet
-          // slideout ("Enable automated trading"), which installs the session
-          // key as an entity-1 operator WITHOUT changing the SCW address.
-          if (j.schema === 2) {
-            const gs = j.grantStatus || 'none';
-            box.innerHTML =
-              '<p>✓ Your smart wallet — <code>' + j.address + '</code> <span class="hint">(v2 — owned by YOUR browser wallet)</span></p>' +
-              '<p class="hint">Balance: ' + (j.eth != null ? j.eth.toFixed(6) : '0.000000') + ' ETH · ' + (j.deployed ? 'deployed ✓' : 'not deployed — activate it in the wallet slideout') + '</p>' +
-              '<p class="hint">Custody: your browser wallet is the on-chain owner. No session key to generate or back up.</p>' +
-              '<p class="hint">Automation: <b>' + (gs === 'granted' ? 'ENABLED — the session key can trade unattended' : gs === 'pending' ? 'grant pending — finish it in the wallet slideout (Enable automated trading)' : 'off — enable it via the wallet slideout → "Enable automated trading"') + '</b>.</p>' +
-              '<p class="hint" style="color:#e8b661">⚠ Do NOT use the Generate/Regenerate buttons below — they are legacy v1 tools and would derive a different wallet address, orphaning this one.</p>';
-            return;
-          }
-          if (!j.hasKey) {
-            box.innerHTML = '<p class="hint">No session key yet — click <b>Generate a session key</b> below. Your key derives YOUR OWN smart account; fund that address with your plan budget + gas.</p>'
-              + '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b> — change it in the Trading mode card below.</p>';
-            return;
-          }
+          const gs = j.grantStatus || 'none';
           box.innerHTML =
-            '<p>✓ Your smart account — <code>' + j.address + '</code></p>' +
-            '<p class="hint">Balance: ' + j.eth.toFixed(6) + ' ETH' + (j.usd != null ? ' · ' + j.usd.toFixed(2) + ' USD' : '') + ' · ' + (j.deployed ? 'deployed' : 'not yet deployed (first trade deploys it)') + '</p>' +
-            '<p class="hint">Fund THIS address from the wallet slideout. Same key = same address, always.</p>' +
+            '<p>✓ Your smart wallet — <code>' + j.address + '</code> <span class="hint">(owned by YOUR browser wallet)</span></p>' +
+            '<p class="hint">Balance: ' + (j.eth != null ? j.eth.toFixed(6) : '0.000000') + ' ETH · ' + (j.deployed ? 'deployed ✓' : 'not deployed — activate it in the wallet slideout') + '</p>' +
+            '<p class="hint">Automation: <b>' + (gs === 'granted' ? 'ENABLED — the session key can trade unattended' : gs === 'pending' ? 'grant pending — finish it in the wallet slideout (Enable automated trading)' : 'off — enable it via the wallet slideout → "Enable automated trading"') + '</b>.</p>' +
             '<p class="hint">Current mode: <b>' + (j.signerMode || 'copilot') + '</b> — change it in the Trading mode card below.</p>';
         } catch (e) {
           box.innerHTML = '<p class="hint" style="color:#f87171">' + (e.message || e) + '</p>';
         }
-      }
-      async function generateUserKey(btn) {
-        if (!confirm('Generate a session key? It is stored encrypted on the server and shown ONCE below — back it up immediately. It is a wallet seed.')) return;
-        btn.disabled = true; btn.textContent = 'Generating…';
-        try {
-          const r = await fetch('/api/user/session-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
-          const j = await r.json();
-          if (!j.ok) throw new Error(j.error || j.message || 'generation failed');
-          document.getElementById('userGenKey').textContent = j.sessionKey;
-          document.getElementById('userGenAddr').textContent = j.address;
-          document.getElementById('userKeyGenResult').style.display = '';
-          btn.textContent = 'Regenerate key';
-          loadUserWallet();
-        } catch (e) {
-          alert('Generation failed: ' + (e.message || e));
-        } finally { btn.disabled = false; }
-      }
-      async function regenerateUserKey(btn) {
-        if (!confirm('Regenerate? Your NEW smart account is a different address. Sweep funds out of the old account first (wallet slideout → Move out).')) return;
-        btn.disabled = true; btn.textContent = 'Generating…';
-        try {
-          let r = await fetch('/api/user/session-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
-          let j = await r.json();
-          if (!j.ok && j.blocked === 'funds-present') {
-            if (!confirm(j.message + '\\n\\nOverride and generate anyway? The old account stays owned by your old key backup (recoverable), but the app will track the new empty account.')) { btn.disabled = false; btn.textContent = 'Regenerate key'; return; }
-            r = await fetch('/api/user/session-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ force: true }) });
-          }
-          const j2 = await r.json();
-          if (!j2.ok) throw new Error(j2.error || j2.message || 'generation failed');
-          document.getElementById('userGenKey').textContent = j2.sessionKey;
-          document.getElementById('userGenAddr').textContent = j2.address;
-          document.getElementById('userKeyGenResult').style.display = '';
-          loadUserWallet();
-        } catch (e) { alert('Generation failed: ' + (e.message || e)); }
-        finally { btn.disabled = false; btn.textContent = 'Regenerate key'; }
       }
       loadUserWallet();
       async function saveAlchemy() {
@@ -1904,15 +1816,6 @@ const server = createServer(async (req, res) => {
         return json(await getUserWalletStatus(uid, "ethereum"));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
-    if (url === "/api/user/session-key" && method === "POST") {
-      try {
-        const uid = sessionAddress(req);
-        if (!uid) return json({ ok: false, error: "authentication required" }, 401);
-        const body = JSON.parse(await readBody() || "{}");
-        const r = await generateUserSessionKey(uid, "ethereum", { force: body.force === true });
-        return json(r);
-      } catch (e) { return json({ ok: false, error: e.message }); }
-    }
     // Per-user signer mode toggle (autonomy requires a stored session key)
     if (url === "/api/user/signer-mode" && method === "POST") {
       try {
@@ -1923,17 +1826,11 @@ const server = createServer(async (req, res) => {
         if (mode === "autonomy") {
           // v2 wallets: autonomy requires the automation GRANT (entity-1
           // operator landed on-chain), not a legacy generated session key.
-          const { getWalletRecord, isV2Record, } = await import("./smart-wallet-registry.mjs");
+          const { getWalletRecord, isV2Record } = await import("./smart-wallet-registry.mjs");
           const rec = getWalletRecord(uid);
-          if (rec && isV2Record(rec)) {
-            if (rec.grantStatus !== "granted") {
-              return json({ ok: false, error: "automation not granted yet — open the wallet slideout and click \u201cEnable automated trading\u201d" });
-            }
-          } else {
-            const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
-            if (!(await resolveUserSessionKeyAsync(uid))) {
-              return json({ ok: false, error: "generate a session key first — autonomy needs one to sign trades" });
-            }
+          if (!rec || !isV2Record(rec)) return json({ ok: false, error: "no smart wallet registered — sign in again" });
+          if (rec.grantStatus !== "granted") {
+            return json({ ok: false, error: "automation not granted yet — open the wallet slideout and click \u201cEnable automated trading\u201d" });
           }
         }
         setUserField(uid, "signer_mode", mode);
@@ -2653,27 +2550,6 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
         }));
       } catch (e) { return json({ ok: false, error: e.message }); }
     }
-    // Generate the burner session key server-side; returns the key ONCE (the
-    // caller persists it to .env and the UI displays it for immediate backup).
-    if (url === "/api/smart-wallet/generate" && method === "POST") {
-      try {
-        const { generateSessionKey } = await import("./smart-wallet-api.mjs");
-        const { chain, force } = JSON.parse(await readBody() || "{}");
-        const gen = await generateSessionKey(chain || "ethereum", { force: Boolean(force) });
-        if (gen.ok) writeEnvValues({ AA_SESSION_KEY: gen.sessionKey });
-        return json(gen);
-      } catch (e) { return json({ ok: false, error: e.message }); }
-    }
-    if (url === "/api/smart-wallet/move" && method === "POST") {
-      try {
-        const body = JSON.parse(await readBody());
-        return json(await moveFunds({
-          direction: body.direction, asset: body.asset || "eth",
-          amount: body.amount, chainKey: body.chain || "ethereum",
-          userId: sessionAddress(req),
-        }));
-      } catch (e) { return json({ ok: false, error: e.message }); }
-    }
     // USDC sweep OUT of the session SCW → the user's EOA (2026-09-24). The
     // sells executed in autonomy mode pay proceeds into the SCW; this moves
     // them back so the user can trade on any DEX from their browser wallet.
@@ -2726,7 +2602,6 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
         const dep = getChain(chainKey);
         const token = getAddress(dep.dollar);
         const dec = dep.dollarDecimals ?? 6;
-        const { getSmartAccountClient } = await import("./smart-account.mjs");
         // The SCW to fund: the session signer's address (per-user AA wallet).
         const signer = await resolveSignerUser(uid, chainKey);
         const scwAddress = getAddress(signer.address);

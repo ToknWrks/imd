@@ -1,19 +1,14 @@
 /**
- * smart-account.mjs — Alchemy LightAccount v2 signer backend (server-side)
+ * smart-account.mjs — per-user smart-wallet signer backend (server-side).
  *
- * NOTE 2026-09-17: switched from ModularAccountV2 to LightAccount v2.
- * MA v2's first-UO deploy path fails AA23/UnrecognizedFunction(0x0) on mainnet
- * AND sepolia with SDK 4.88.5 (reproduced with the SDK's own flow + fresh key —
- * an Alchemy contract/SDK drift in MA v2's plugin init, not our config).
- * LightAccount builds cleanly through the same middleware (factory
- * 0x0000000000400cdfef5e2714e63d8040b700bc24, EntryPoint 0.7), is Alchemy's
- * flagship account, and fits Phase 1 exactly: the burner session key owns the
- * account directly. If Phase 2 session-key policies are still wanted, they can
- * ride on LightAccount's plugin system or MA v2 once Alchemy fixes the drift.
- *
- * The VPS never holds any owner key beyond the burner session key it signs with.
- * See docs/smart-account-signer.md for the full plan and docs/vps-deploy.md §0
- * for why this replaces the vault-file model on a VPS.
+ * v2 ONLY (v1 removed 2026-09-24). Every wallet is an Alchemy Semi-Modular
+ * Account v2 OWNED BY THE USER'S EOA (CREATE2 from factory
+ * createSemiModularAccount(ownerEoa, salt)). The server never owns anything:
+ * when the user enables automation, a server-held session key is installed
+ * as the ENTITY-1 operator (SingleSignerValidationModule) and signs
+ * UserOperations for that one wallet. The legacy v1 model (a burner session
+ * key that OWNED a MultiOwnerLightAccount, plus the global AA_SESSION_KEY env
+ * signer) is gone — it derived orphan addresses and confused wallet identity.
  *
  * Interface contract (must match signer.mjs exactly):
  *   { kind, address, getEthBalanceWei(), callContract({ address, abi, functionName, args, value }) → txHash }
@@ -23,7 +18,7 @@
  */
 import { WalletClientSigner } from "@aa-sdk/core";
 import { alchemy, mainnet, base, defineAlchemyChain } from "@account-kit/infra";
-import { createLightAccountClient, createMultiOwnerLightAccountAlchemyClient, predictModularAccountV2Address } from "@account-kit/smart-contracts";
+import { predictModularAccountV2Address } from "@account-kit/smart-contracts";
 import { getDefaultSingleSignerValidationModuleAddress } from "@account-kit/smart-contracts/experimental";
 import { createWalletClient, createPublicClient, http, getAddress, encodeFunctionData, concat } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -153,80 +148,49 @@ function accountKitChain(chainKey) {
   return chain;
 }
 
-/**
- * Build the viem WalletClient for a session key (explicit key param or env).
- *
- * Per-connected-wallet model (2026-09-18): each connected wallet gets its OWN
- * session key + smart account (registry in smart-wallet-registry.mjs). The
- * active session key is the one bound to the currently connected wallet.
- */
-function sessionKeyWalletClient(chainKey, sessionKeyOverride = null) {
+/** viem WalletClient for a user's session key (always passed explicitly). */
+function sessionKeyWalletClient(chainKey, sessionKey) {
   const dep = getChain(chainKey);
-  const sk = (sessionKeyOverride ?? process.env.AA_SESSION_KEY)?.trim();
-  if (!sk) throw new Error("AA_SESSION_KEY not set — cannot sign UserOperations");
+  const sk = sessionKey?.trim();
+  if (!sk) throw new Error("no session key for this wallet — automation is not granted (open the wallet slideout → Enable automated trading)");
   const account = privateKeyToAccount(sk.startsWith("0x") ? sk : "0x" + sk);
-  return createWalletClient({
-    account,
-    chain: dep.viemChain,
-    transport: http(dep.httpRpc()),
-  });
+  return createWalletClient({ account, chain: dep.viemChain, transport: http(dep.httpRpc()) });
 }
 
-/** Cached clients per chain+sessionKey — resolving the SCW address does an RPC round-trip. */
+/** Cached clients per chain + session key + SCW. */
 const _clients = new Map();
 
-/** Drop the cached AA client (after changing AA_SESSION_KEY or the active wallet). */
+/** Drop cached AA clients (after a grant or key change). */
 export function invalidateSmartAccountClient(chainKey = "ethereum", sessionKey = null) {
-  if (sessionKey) _clients.delete(chainKey + ":" + sessionKey);
-  else for (const k of [..._clients.keys()]) if (k.startsWith(chainKey)) _clients.delete(k);
+  for (const k of [..._clients.keys()]) {
+    if (!k.startsWith(chainKey + ":")) continue;
+    if (!sessionKey || k.startsWith(chainKey + ":" + sessionKey + ":")) _clients.delete(k);
+  }
 }
 
 /**
- * Get the AA client for a specific session key (per-connected-wallet SCWs).
- * Without a key override, uses the active AA_SESSION_KEY (back-compat).
- */
-/**
- * Get the AA client for a specific session key (per-connected-wallet SCWs).
- * Without a key override, uses the active AA_SESSION_KEY (back-compat).
- *
- * v2 wallets (2026-09-20): the SCW is the EOA-owned SMA from the registry, and
- * the session key is an ENTITY-1 operator (SingleSignerValidationModule) — so
- * build the client with createModularAccountV2Client, accountAddress = the
- * registry SCW, signerEntity = { entityId: 1, isGlobalValidation: false }.
- * The legacy path (MultiOwnerLightAccount derived FROM the key) is kept only
- * for v1 records — driving a v2 wallet through it sends UOs to an orphan
- * LightAccount address (AA13, found live 2026-09-20).
+ * AA client for a v2 wallet: SMA pinned to the user's EOA-owned SCW
+ * (accountAddress = registry SCW), session key signing as ENTITY 1.
+ * Both arguments are REQUIRED — there is no derive-from-key fallback anymore
+ * (that path produced orphan LightAccount addresses: AA13, 2026-09-20).
  */
 export async function getSmartAccountClient(chainKey = "ethereum", { sessionKey = null, scwAddress = null } = {}) {
-  const cacheKey = chainKey + ":" + (sessionKey ?? "default") + ":" + (scwAddress ?? "derive");
+  if (!scwAddress) throw new Error("getSmartAccountClient: scwAddress required (v2 wallets only — v1 derivation was removed)");
+  if (!sessionKey) throw new Error("getSmartAccountClient: sessionKey required — automation is not granted for this wallet");
+  const cacheKey = chainKey + ":" + sessionKey + ":" + getAddress(scwAddress);
   if (_clients.has(cacheKey)) return _clients.get(cacheKey);
   const p = (async () => {
-    const walletClient = sessionKeyWalletClient(chainKey, sessionKey);
-    const signer = new WalletClientSigner(walletClient, "session-key");
-    if (scwAddress) {
-      // v2: SMA client pinned to the user's EOA-owned wallet, session key signs as entity 1
-      const { createModularAccountV2Client } = await import("@account-kit/smart-contracts");
-      const client = await createModularAccountV2Client({
-        chain: accountKitChain(chainKey),
-        transport: alchemy({ apiKey: requireAlchemyKey() }),
-        signer,
-        accountAddress: getAddress(scwAddress),
-        signerEntity: { entityId: 1, isGlobalValidation: false },
-      });
-      return client;
-    }
-    // MultiOwnerLightAccount: supports transferOwnership / addOwner, so key
-    // rotation ADDS a signer instead of orphaning the account + funds (the
-    // single-owner LightAccount trap: regenerate → old key powerless → funds
-    // invisible to the app). Old key stays authoritative until explicitly
-    // demoted. Phase 2 on-chain spend caps tracked in docs/smart-account-signer.md.
-    const client = await createMultiOwnerLightAccountAlchemyClient({
+    const signer = new WalletClientSigner(sessionKeyWalletClient(chainKey, sessionKey), "session-key");
+    const { createModularAccountV2Client } = await import("@account-kit/smart-contracts");
+    return createModularAccountV2Client({
       chain: accountKitChain(chainKey),
       transport: alchemy({ apiKey: requireAlchemyKey() }),
       signer,
+      accountAddress: getAddress(scwAddress),
+      signerEntity: { entityId: 1, isGlobalValidation: false },
     });
-    return client;
   })();
+  p.catch(() => _clients.delete(cacheKey));
   _clients.set(cacheKey, p);
   return p;
 }
@@ -238,26 +202,19 @@ function requireAlchemyKey() {
 }
 
 /**
- * The signer object handed to resolveSigner() consumers. `address` is the
- * SMART ACCOUNT address (counterfactual if undeployed), not the session key's
- * EOA — wallet-position scans, approvals, and trade rows all read it.
- * scwAddress: v2 wallets pass the registry SCW here so the client pins the
- * EOA-owned SMA and signs as entity-1 (see getSmartAccountClient).
+ * The signer object handed to trade code. `address` is the user's SCW (the
+ * registry address), never the session key's EOA — wallet-position scans,
+ * approvals, and trade rows all read it.
  */
-export async function buildSmartAccountSigner(chainKey = "ethereum", { sessionKey = null, scwAddress = null } = {}) {
+export async function buildSmartAccountSigner(chainKey = "ethereum", { sessionKey, scwAddress } = {}) {
   const dep = getChain(chainKey);
-  // sessionKey override (Phase 2): per-user autonomy — the caller swaps env
-  // AA_SESSION_KEY OR passes the user's stored key directly; the client cache
-  // is keyed per session key so users never collide.
   const client = await getSmartAccountClient(chainKey, { sessionKey, scwAddress });
   const address = getAddress(client.account.address);
-  const publicClient = createPublicClient({
-    chain: dep.viemChain,
-    transport: http(dep.httpRpc()),
-  });
-
-  console.log(`[signer] Using Alchemy smart account ${address} (session-key signer) on ${dep.name}`);
-
+  if (address.toLowerCase() !== getAddress(scwAddress).toLowerCase()) {
+    throw new Error(`smart-account client resolved ${address} but the registry wallet is ${scwAddress} — refusing to sign`);
+  }
+  const publicClient = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc()) });
+  console.log(`[signer] smart wallet ${address} (entity-1 session key) on ${dep.name}`);
   return {
     kind: "smart-account",
     address,
@@ -266,13 +223,10 @@ export async function buildSmartAccountSigner(chainKey = "ethereum", { sessionKe
     },
     async callContract({ address: contractAddress, abi, functionName, args, value }) {
       // Gas fields from wrapSignerGas are deliberately IGNORED: UserOperation
-      // gas is estimated by the bundler middleware. (Accepted silently — the
-      // sniper routes pass maxFeePerGas/maxPriorityFeePerGas today.)
+      // gas is estimated by the bundler middleware.
       const data = encodeFunctionData({ abi, functionName, args });
-      const uo = { target: contractAddress, data, value: value ?? 0n };
-      const { hash } = await client.sendUserOperation({ uo });
-      const txHash = await client.waitForUserOperationTransaction({ hash });
-      return txHash;
+      const { hash } = await client.sendUserOperation({ uo: { target: contractAddress, data, value: value ?? 0n } });
+      return client.waitForUserOperationTransaction({ hash });
     },
   };
 }

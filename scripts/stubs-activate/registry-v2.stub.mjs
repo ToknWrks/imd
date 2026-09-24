@@ -1,12 +1,13 @@
 
     import { privateKeyToAccount } from "viem/accounts";
     const SK = "0x" + "1".repeat(64);
-    // v1 record preloaded for the activate test's probe user.
+    // v2 record preloaded for the activate test's probe user (v1 removed).
     const store = {
       "0x2222222222222222222222222222222222222222": {
-        scwAddress: "0x9999999999999999999999999999999999999999",
-        sessionKeyAddress: privateKeyToAccount(SK).address,
-        sessionKeyEnc: "enc:" + SK,
+        schema: 2,
+        scwAddress: "0xdddddddddddddddddddddddddddddddddddddddd",
+        ownerEoa: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        salt: 0, sessionKeyEnc: null, sessionKeyAddress: null, grantStatus: "none",
       },
     };
     export function isV2Record(rec) { return Boolean(rec && rec.schema === 2 && rec.ownerEoa); }

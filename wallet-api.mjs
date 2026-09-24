@@ -54,21 +54,9 @@ export async function walletApiHandler({ isSignerConfigured, json, userId = null
         const { resolveUserReadWallets } = await import("./smart-wallet-api.mjs");
         addresses = await resolveUserReadWallets(readAddress, key);
       } else {
-        // Legacy fallback: resolve the CONNECTED-layer wallet (vault/raw key),
-        // never the AA smart account — the SCW has its own card in the UI and
-        // is not "the user's wallet". invalidateSigner avoids serving a cached
-        // AA signer under the current env snapshot.
-        const { invalidateSigner, resolveSigner } = await import("./signer.mjs");
-        const prev = process.env.SMART_ACCOUNT_ACTIVE;
-        process.env.SMART_ACCOUNT_ACTIVE = "false";
-        invalidateSigner(key);
-        try {
-          const signer = await resolveSigner(key);
-          addresses = [signer.address];
-        } finally {
-          process.env.SMART_ACCOUNT_ACTIVE = prev;
-          invalidateSigner(key);
-        }
+        // Legacy local-dev fallback (no session user): the env system signer.
+        const { resolveSigner } = await import("./signer.mjs");
+        addresses = [(await resolveSigner(key)).address];
       }
       const client = createPublicClient({ chain: dep.viemChain, transport: (await import("viem")).http(dep.httpRpc()) });
       const [ethWei, ethPrice, ...tokenRaws] = await Promise.all([

@@ -503,10 +503,9 @@ export function applyAccumulationStrategy({ id, reviewId = "manual", watcherId, 
     const reservedBudgetUsd = existing?.reserved_budget_usd ?? 0;
     // user_id (2026-09-21 fix): derived from the watcher, never left NULL.
     // A NULL user_id here made resolveSignerUser fall back to the "system"
-    // signer, which requires the legacy AA_SESSION_KEY env var — unset on
-    // hosted per-user autonomy — so every scheduled/dip buy under an
-    // applied plan threw "AA_SESSION_KEY not set" instead of using the
-    // watcher owner's own registry session key (found live 2026-09-21).
+    // signer (none exists on hosted), so every scheduled/dip buy under an
+    // applied plan failed instead of using the watcher owner's own v2
+    // registry session key (found live 2026-09-21).
     const watcher = db.prepare("SELECT user_id FROM dip_watchers WHERE id = ?").get(watcherId);
     const userId = watcher?.user_id ?? null;
     db.prepare("DELETE FROM accumulation_strategies WHERE watcher_id = ?").run(watcherId);

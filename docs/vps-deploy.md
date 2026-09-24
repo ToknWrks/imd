@@ -1,5 +1,13 @@
 # VPS Deployment — IMD Launchpad Terminal (as-built, 2026-09-19)
 
+> **This VPS is production. The laptop is for editing code only.**
+> Host `204.168.185.82` (hostname `AgentSignal1`), login
+> `ssh -i ~/.ssh/id_hetzner root@204.168.185.82`, app dir
+> `/root/accumulate-imd`, serves `https://imd.illuminati.co`.
+> Every user's wallet, signer mode, session key and trade lives in THIS
+> box's `data/` — never answer those questions from a laptop copy.
+> Deploy: commit + push locally → here `git pull && ./imd.sh restart`.
+
 How the app actually runs on the Hetzner VPS at `https://imd.illuminati.co`
 (legacy `imd.zooch.app` still works during transition). Supersedes the
 2026-09-10 vault-only version of this doc — the signer model changed
@@ -67,7 +75,6 @@ The box also runs the unrelated `agentsignal` app and (for the sibling fork)
 
 ```bash
 MASTER_KEY=<long random hex>   # REQUIRED — missing = hard throw on any secret write
-SMART_ACCOUNT_ACTIVE=true      # keep true — see note below; NOT what makes per-user AA work
 ALCHEMY_API_KEY=<key>          # required — WS subscriptions, AA bundler, transfer scans
 ALLOWED_WALLET=0x...           # optional single-wallet pin; else REGISTRATION governs
 REGISTRATION=open              # open | closed
@@ -77,17 +84,10 @@ COPILOT_ACTIVE=false           # legacy global flag; per-user signer_mode toggle
 IMD_DASHBOARD_PORT=4210
 ```
 
-`SMART_ACCOUNT_ACTIVE` only gates the legacy **global** signer
-(`resolveSigner()` — dip-watcher's boot-time signer check, and any
-null-`user_id` legacy rows). It has no effect on per-user signing:
-`resolveSignerUser(userId)` (signer.mjs) builds each user's AA signer
-straight from their own registry session key, regardless of this flag. Keep
-it `true` anyway so `dip-watcher.mjs` doesn't refuse to boot for lack of a
-configured system signer.
-
-Do **not** set the legacy `AA_SESSION_KEY` on hosted — it resolves a global
-env wallet that belongs to nobody (deleted from this VPS already). Per-user
-session keys live in the registry, generated automatically per user (see §4).
+There is no env-level smart-account signer (v1 removed 2026-09-24):
+`SMART_ACCOUNT_ACTIVE` and `AA_SESSION_KEY` are gone — delete them from
+`.env` if present. Every user's wallet is v2 (owned by their EOA), and
+autonomy signs with that user's entity-1 session key from the registry.
 
 ## 4. First run
 
@@ -110,11 +110,11 @@ step: clicking the header's **Connect wallet** button IS signing in.
    do). The Reown AppKit modal opens, they pick a wallet, and `personal_sign`
    a one-time nonce.
 2. On successful verification the server sets the session cookie AND calls
-   `ensureWalletSession()` in the same request: unknown wallet → generates a
-   fresh per-user session key, derives its smart wallet (SCW), records both
-   encrypted in `data/connected-wallets.json`; known wallet → reuses its
-   existing key. There's no separate "connect" click anymore — logging in
-   already proved wallet ownership.
+   `ensureWalletSession()` in the same request: unknown wallet → derives its
+   v2 smart wallet (owned by that EOA) and records it in
+   `data/connected-wallets.json` with NO key; known wallet → returned as-is.
+   Automation is granted later in the wallet slideout ("Enable automated
+   trading"), which installs a session key as an entity-1 operator.
 3. **Settings → Signer** is where the user sees/manages the result: their
    SCW address, and the `copilot` (default — browser wallet approves every
    trade, no server key) vs `autonomy` (server signs with their session key)

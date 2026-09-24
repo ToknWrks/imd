@@ -1,3 +1,10 @@
+> **⚠️ HISTORICAL — v1 REMOVED (2026-09-24).** Everything below describes the
+> v1 model (burner session key that OWNED a MultiOwnerLightAccount, global
+> `SMART_ACCOUNT_ACTIVE` / `AA_SESSION_KEY` signer). That code is deleted.
+> Current model: every wallet is a v2 Semi-Modular Account owned by the
+> user's EOA; autonomy = an entity-1 session-key operator granted in the
+> wallet slideout. See `CLAUDE.md` (top banner) and `smart-account.mjs`.
+
 # Scope — Alchemy Smart-Account signer mode (server-side session key)
 
 > **Status: IMPLEMENTED & LIVE (as of 2026-09-17).** The interactive signer

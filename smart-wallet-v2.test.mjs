@@ -7,7 +7,7 @@
  *   - resolveUserSessionKeyAsync: null (not throw) for pre-grant v2 records.
  *   - resolveUserReadWallet(s): SCW address straight from the v2 record.
  *   - activateSmartWallet: browser-sign payload (owner = the EOA, never self-owned).
- *   - v1 regression: existing session-key records still resolve via the AA client.
+ *   - v1 removed: legacy records are refused (never overwritten), their keys ignored.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -122,11 +122,19 @@ const SNIPPET = `
   out.push(["activate-browser", act.ok === true && act.browserSign === true && act.factory && act.callData.length > 10]);
   out.push(["activate-owner", act.owner && act.owner.toLowerCase() === probe && act.owner.toLowerCase() !== act.scwAddress.toLowerCase()]);
 
-  // 6. moveFunds('out') for v2 → explicit browser-sign error (no silent server key use)
+  // 6. v1 removed: a legacy (non-v2) record is REFUSED loudly, never overwritten
+  const legacy = "0x" + "e".repeat(40);
+  __store()[legacy] = { scwAddress: "0x" + "7".repeat(40), sessionKeyEnc: "enc:0x" + "1".repeat(64) };
   let threw = null;
-  try { await mod.moveFunds({ direction: "out", asset: "eth", amount: 0.1, chainKey: "ethereum", userId: probe }); }
-  catch (e) { threw = e.message; }
-  out.push(["moveout-blocked", threw !== null && /browser/.test(threw)]);
+  try { await mod.ensureWalletSession(legacy, "ethereum"); } catch (e) { threw = e.message; }
+  out.push(["v1-record-refused", threw !== null && /v1/.test(threw) && __store()[legacy].scwAddress === "0x" + "7".repeat(40) && !__store()[legacy].schema]);
+  // ...and it yields NO session key (v1 keys are never used to sign)
+  out.push(["v1-key-ignored", (await mod.resolveUserSessionKeyAsync(legacy)) === null]);
+  // granted v2 key resolves
+  __store()[probe.toLowerCase()].sessionKeyEnc = "enc:0x" + "2".repeat(64);
+  out.push(["v2-key-resolves", (await mod.resolveUserSessionKeyAsync(probe)) === "0x" + "2".repeat(64)]);
+  __store()[probe.toLowerCase()].sessionKeyEnc = null;
+  out.push(["v1-api-gone", typeof mod.moveFunds === "undefined" && typeof mod.generateUserSessionKey === "undefined" && typeof mod.generateSessionKey === "undefined"]);
 
   // 7. quoteDirectSweepV2 guards (2026-09-20 direct-execute sweep): needs a v2
   //    record and a positive amount — both checked BEFORE any RPC call.
@@ -148,11 +156,14 @@ const SNIPPET = `
 `;
 writeFileSync("scripts/.v2-snippet.mjs", SNIPPET);
 
-test("v2 wallet lifecycle: derive → copilot-null → read → browser-activate → moveout guard", () => {
+test("v2 wallet lifecycle: derive → copilot-null → read → browser-activate → v1 refused", () => {
   const out = execFileSync(process.execPath, ["--import", "./scripts/test-loader.mjs", "scripts/.v2-snippet.mjs"], { encoding: "utf8", env: { ...process.env, TEST_STUB_DIR: "stubs-v2" } });
   assert.match(out, /PASS read-wallets-v2/);
   assert.match(out, /PASS activate-owner/);
-  assert.match(out, /PASS moveout-blocked/);
+  assert.match(out, /PASS v1-record-refused/);
+  assert.match(out, /PASS v1-key-ignored/);
+  assert.match(out, /PASS v2-key-resolves/);
+  assert.match(out, /PASS v1-api-gone/);
   assert.match(out, /PASS direct-sweep-needs-record/);
   assert.match(out, /PASS direct-sweep-needs-amount/);
   assert.doesNotMatch(out, /FAIL/);

@@ -61,24 +61,26 @@ export async function resolveSignerUser(userId, chainKey = "ethereum") {
       return buildCoPilotSignerFor(userId, chainKey);
     }
     if (mode === "autonomy") {
-      // Unified resolver (2026-09-18): registry first, users-table key as legacy
-      // fallback — one wallet per user across slideout, settings, and signing.
-      const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
+      // v2 only: the user's EOA-owned SCW from the registry, signed by the
+      // granted entity-1 session key. No derivation, no users-table fallback.
       const { getWalletRecord, isV2Record } = await import("./smart-wallet-registry.mjs");
-      const sessionKey = await resolveUserSessionKeyAsync(userId);
-      if (!sessionKey) throw new Error(`user ${userId.slice(0, 6)}…${userId.slice(-4)} has autonomy mode but no session key stored — connect your wallet in the header (or generate one in Settings)`);
-      // v2: pin the client to the registry SCW (EOA-owned SMA, entity-1 signing).
       const rec = getWalletRecord(userId);
-      const scwAddress = rec && isV2Record(rec) ? rec.scwAddress : null;
-      // Per-user session key passed directly — no env swap needed; the client
-      // cache in smart-account.mjs keys on the session key so users can't collide.
+      if (!rec || !isV2Record(rec)) throw new Error(`user ${userId.slice(0, 6)}…${userId.slice(-4)} has no v2 smart wallet — reconnect the wallet in the header`);
+      // Key presence is the gate (unchanged behavior): a "pending" grantStatus
+      // can still have a working on-chain operator — the bundler is the judge.
+      if (!rec.sessionKeyEnc) {
+        throw new Error(`user ${userId.slice(0, 6)}…${userId.slice(-4)} is in autonomy mode but automation is not granted — open the wallet slideout → Enable automated trading`);
+      }
+      const { resolveUserSessionKeyAsync } = await import("./smart-wallet-api.mjs");
+      const sessionKey = await resolveUserSessionKeyAsync(userId);
+      if (!sessionKey) throw new Error(`session key for ${userId.slice(0, 6)}…${userId.slice(-4)} is missing from the registry`);
       const { buildSmartAccountSigner } = await import("./smart-account.mjs");
-      return buildSmartAccountSigner(chainKey, { sessionKey, scwAddress });
+      return buildSmartAccountSigner(chainKey, { sessionKey, scwAddress: rec.scwAddress });
     }
     throw new Error(`unknown signer_mode "${mode}"`);
   })();
   // Evict on failure — a rejected resolution (missing session key, RPC
-  // hiccup, the AA_SESSION_KEY bug) must not poison this cache key for the
+  // hiccup) must not poison this cache key for the
   // rest of the process's life; the next call should get a fresh attempt.
   p.catch(() => _signerPromises.delete(cacheKey));
   _signerPromises.set(cacheKey, p);
@@ -135,7 +137,7 @@ export async function resolveSigner(chainKey = "ethereum") {
 
 /**
  * Drop the cached signer for a chain (call after changing signer env vars —
- * SMART_ACCOUNT_ACTIVE / VAULT_ACTIVE / AGENT_PRIVATE_KEY hot-updates).
+ * VAULT_ACTIVE / AGENT_PRIVATE_KEY hot-updates).
  */
 export function invalidateSigner(chainKey = "ethereum") {
   _signerPromises.delete(chainKey);
@@ -156,17 +158,9 @@ async function _resolveSigner(chainKey = "ethereum") {
     return buildCoPilotSigner(chainKey);
   }
 
-  if (process.env.SMART_ACCOUNT_ACTIVE === "true") {
-    // Alchemy Modular Account v2 via a VPS-held session key. callContract()
-    // sends a UserOperation and resolves to the inner tx hash, so every
-    // downstream receipt-wait/gas-ledger path works unchanged. See
-    // smart-account.mjs + docs/smart-account-signer.md.
-    if (chainKey !== "ethereum" && chainKey !== "base" && chainKey !== "robinhood") {
-      throw new Error(`smart-account signing not supported on ${dep.name}`);
-    }
-    const { buildSmartAccountSigner } = await import("./smart-account.mjs");
-    return buildSmartAccountSigner(chainKey);
-  }
+  // (SMART_ACCOUNT_ACTIVE global signer removed with v1, 2026-09-24: smart
+  // wallets are strictly per-user — resolveSignerUser(userId). There is no
+  // system-wide smart account.)
 
   if (process.env.VAULT_ACTIVE === "true") {
     const vaultChainName = VAULT_CHAIN_NAMES[chainKey];
