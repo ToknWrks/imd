@@ -40,7 +40,8 @@ const {
   getActiveDipWatchers, getActiveAccumulationStrategies, getAccumulationStrategy, isDipWatcherCoolingDown,
   getDipWatcher, touchDipWatcherTriggered, insertDipTrade, updateWalletPosition, reserveStrategyExecution, finalizeStrategyExecution, setAccumulationStrategyActive,
 } = await import("./db.mjs");
-const { findBestPool, getEthUsdPrice, buyToken, findBestV4Pool, findBestAerodromePool, findBestV3DollarPool, isDollarQuotedV3, resolvePoolOverride } = await import("./dip-swap.mjs");
+const { findBestPool, getEthUsdPrice, buyToken, findBestV4Pool, findBestAerodromePool, findBestV3DollarPool, isDollarQuotedV3, resolvePoolOverride, getCurveCoinState, getImdPerEth } = await import("./dip-swap.mjs");
+const { LAUNCHPAD_HOOK, deriveCurvePoolId, buyCurveCoin } = await import("./curve-buy.mjs");
 const { computeWalletPosition } = await import("./wallet-position.mjs");
 const { resolveSigner, resolveSignerUser } = await import("./signer.mjs");
 
@@ -96,6 +97,15 @@ const AERO_V2_SWAP_ABI = parseAbi([
   "event Swap(address indexed sender, address indexed to, uint256 amount0In, uint256 amount0Out, uint256 amount1In, uint256 amount1Out)",
 ]);
 
+// IMD-launchpad curve trades (2026-09-24): curve coins (VANGUARD, $BLD, …) have
+// no AMM pool — the launchpad hook settles every trade itself and emits
+// CurveSwap. Signature resolved from topic0 0x4e041a3c…; field layout verified
+// against a real VANGUARD sell (tx 0xb633e410…: buy=false, ethAmount
+// 621709465364380 = the 0.000622 ETH the seller received, coinAmount 50,000e18).
+const CURVE_SWAP_ABI = parseAbi([
+  "event CurveSwap(bytes32 indexed poolId, address indexed trader, address indexed router, bool buy, uint256 ethAmount, uint256 imdAmount, uint256 coinAmount, uint256 creatorFee, uint256 burnFee)",
+]);
+
 const RECONCILE_MS = 30_000;
 const POSITION_REFRESH_MS = 15 * 60_000; // wallet-position scans are the heaviest HTTP consumers (transfer history) — 15min after the 2026-09-11 Alchemy rate-limit (was 5min)
 
@@ -126,6 +136,36 @@ async function subscribe(watcher) {
       return null;
     });
   }
+  // IMD-launchpad curve coin: its trades happen ONLY on the launchpad curve
+  // (no graduation, no LP). Watch the hook's CurveSwap events for this coin's
+  // curve poolId and skip AMM discovery — otherwise VANGUARD failed to
+  // subscribe every 30s and $BLD watched a $764 side pool that never sees the
+  // real sells. A manual pool override still wins.
+  if (!override && chainKey === "ethereum" && watcher.contract_address?.toLowerCase() !== IMD_TOKEN) {
+    const curveState = await getCurveCoinState(watcher.contract_address, chainKey).catch(() => null);
+    if (curveState) {
+      const poolId = deriveCurvePoolId(watcher.contract_address);
+      const unwatch = getWsClient(chainKey).watchContractEvent({
+        address: LAUNCHPAD_HOOK,
+        abi: CURVE_SWAP_ABI,
+        eventName: "CurveSwap",
+        args: { poolId },
+        onLogs: (logs) => {
+          noteWsActivity(chainKey);
+          for (const log of logs) {
+            handleCurveSwap(watcher, log).catch((e) =>
+              console.error(`[dip-watcher] ${label(watcher)}: error handling curve swap — ${e.message}`)
+            );
+          }
+        },
+        onError: (e) => console.error(`[dip-watcher] ${label(watcher)}: curve subscription error — ${e.message}`),
+      });
+      active.set(watcher.id, { unwatch, poolAddress: poolId, chainKey });
+      console.log(`[dip-watcher] Watching ${label(watcher)} on ${dep.name} — IMD launchpad curve pool ${poolId} — threshold $${watcher.threshold_usd}, buy $${watcher.buy_amount_usd}`);
+      return;
+    }
+  }
+
   const v4Pool = override ?? await findBestV4Pool(watcher.contract_address, chainKey).catch(() => null);
   // Curve coins have no V3 pool at all — findBestPool throws; catch so the
   // watcher stays alive (scheduled buys don't need a WS subscription).
@@ -238,6 +278,98 @@ async function subscribe(watcher) {
 
 function label(watcher) {
   return watcher.symbol ?? watcher.contract_address;
+}
+
+/**
+ * IMD-launchpad curve handler. A SELL is CurveSwap with buy=false; ethAmount
+ * is the ETH paid out to the seller (verified against VANGUARD tx 0xb633e410…).
+ * The dip buy executes on the CURVE explicitly — not via buyToken's venue
+ * auto-discovery, which would pick a tiny unhooked side pool when one exists
+ * ($BLD: $764 V4 pool) instead of where the coin actually trades.
+ */
+async function handleCurveSwap(watcher, log) {
+  watcher = getDipWatcher(watcher.id) ?? watcher;
+  const chainKey = watcher.chain || "ethereum";
+  const dep = getChain(chainKey);
+  const { buy, ethAmount } = log.args;
+  if (buy !== false || !(ethAmount > 0n)) return;
+
+  const ethUsd = await getEthUsdPrice(chainKey);
+  const sellUsd = (Number(ethAmount) / 1e18) * ethUsd;
+
+  const strategy = getAccumulationStrategy(watcher.id);
+  const activeStrategy = strategy?.active && strategy.end_at > new Date().toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "") ? strategy : null;
+  if (sellUsd < (activeStrategy?.dip_threshold_usd ?? watcher.threshold_usd)) return;
+
+  if (isDipWatcherCoolingDown(watcher.id)) {
+    console.log(`[dip-watcher] ${label(watcher)}: $${sellUsd.toFixed(0)} curve sell detected but cooling down — skipping`);
+    return;
+  }
+
+  const buyAmountUsd = activeStrategy ? activeStrategy.dip_buy_usd : watcher.buy_amount_usd;
+  if (!(buyAmountUsd > 0)) return;
+  let reservation = null;
+  if (activeStrategy) {
+    try {
+      reservation = reserveStrategyExecution({
+        strategyId: activeStrategy.id, watcherId: watcher.id, kind: "dip", amountUsd: buyAmountUsd,
+      });
+    } catch (e) {
+      console.log(`[dip-watcher] ${label(watcher)}: Zooch dip skipped — ${e.message}`);
+      return;
+    }
+  }
+
+  console.log(`[dip-watcher] 🚨 ${label(watcher)}: $${sellUsd.toFixed(0)} curve sell (tx ${log.transactionHash}) — buying $${buyAmountUsd}`);
+  touchDipWatcherTriggered(watcher.id);
+
+  try {
+    const signer = await userSigner(watcher, chainKey);
+    const curveState = await getCurveCoinState(watcher.contract_address, chainKey);
+    if (!curveState) throw new Error("curve state unavailable from the launchpad indexer");
+    const imdPerEth = await getImdPerEth(chainKey);
+    if (!imdPerEth) throw new Error("can't price IMD (ETH/IMD pool unavailable)");
+    const ethAmountWei = BigInt(Math.round((buyAmountUsd / ethUsd) * 1e18));
+    const balanceWei = await signer.getEthBalanceWei();
+    if (balanceWei < ethAmountWei) {
+      throw new Error(`insufficient ETH balance (have ${Number(balanceWei) / 1e18}, need ${Number(ethAmountWei) / 1e18})`);
+    }
+    const { txHash, quotedOut } = await withCopilotContext(cpAttribution(watcher, "DIP BUY"), () =>
+      buyCurveCoin(signer, watcher.contract_address, ethAmountWei, {
+        slippagePct: watcher.slippage_pct, chainKey, curveState, imdPerEth, universalRouter: dep.v4.universalRouter,
+      }));
+    const tokenAmount = Number(formatUnits(quotedOut, watcher.decimals ?? 18));
+
+    if (reservation) {
+      finalizeStrategyExecution({ executionId: reservation.executionId, txHash });
+      reservation = null;
+    }
+    insertDipTrade({
+      watcher_id: watcher.id,
+      sell_tx_hash: log.transactionHash,
+      sell_usd: sellUsd,
+      buy_tx_hash: txHash,
+      eth_spent: Number(ethAmountWei) / 1e18,
+      token_amount: tokenAmount,
+      price_usd: tokenAmount > 0 ? buyAmountUsd / tokenAmount : null,
+      strategy_id: activeStrategy?.id,
+      execution_kind: activeStrategy ? "dip" : null,
+    });
+    console.log(`[dip-watcher] ✅ ${label(watcher)}: bought on the curve — tx ${txHash}`);
+  } catch (e) {
+    if (reservation) finalizeStrategyExecution({ executionId: reservation.executionId, error: e.message });
+    console.error(`[dip-watcher] ❌ ${label(watcher)}: curve buy failed — ${e.message}`);
+    alertTradeFailure(watcher, "curve dip buy", e.message);
+    insertDipTrade({
+      watcher_id: watcher.id,
+      sell_tx_hash: log.transactionHash,
+      sell_usd: sellUsd,
+      strategy_id: activeStrategy?.id,
+      execution_kind: activeStrategy ? "dip" : null,
+      status: "error",
+      error: e.message,
+    });
+  }
 }
 
 /**
