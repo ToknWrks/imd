@@ -224,8 +224,21 @@ export async function buildSmartAccountSigner(chainKey = "ethereum", { sessionKe
     async callContract({ address: contractAddress, abi, functionName, args, value }) {
       // Gas fields from wrapSignerGas are deliberately IGNORED: UserOperation
       // gas is estimated by the bundler middleware.
+      //
+      // callGasLimit × 1.5 (2026-09-24): the bundler's estimate is a
+      // point-in-time simulation, but swap gas depends on pool state (ticks
+      // crossed, hook bookkeeping) at INCLUSION time. Live case: an IMD sell
+      // through the hooked pool was estimated at 299,914 while the same call
+      // needed ~300k+ once mined — it ran out of gas inside the hook's
+      // afterSwap (v4 HookCallFailed 0xa9e35b2f). Replaying that exact op at
+      // its pre-state: 299,914 reverts, 399,914 succeeds. Unused call gas is
+      // not charged beyond the EntryPoint's small penalty, so the headroom is
+      // cheap insurance.
       const data = encodeFunctionData({ abi, functionName, args });
-      const { hash } = await client.sendUserOperation({ uo: { target: contractAddress, data, value: value ?? 0n } });
+      const { hash } = await client.sendUserOperation({
+        uo: { target: contractAddress, data, value: value ?? 0n },
+        overrides: { callGasLimit: { multiplier: 1.5 } },
+      });
       return client.waitForUserOperationTransaction({ hash });
     },
   };
