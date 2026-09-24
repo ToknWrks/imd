@@ -569,9 +569,9 @@ export function reserveStrategyExecution({ strategyId, watcherId, kind, amountUs
       if (elapsedMinutes < strategy.cooldown_minutes) throw new Error("dip cooldown is active");
     }
     const execution = db.prepare(`
-      INSERT INTO strategy_executions (strategy_id, watcher_id, kind, amount_usd, scheduled_for, tx_hash, status, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(strategyId, watcherId, kind, amountUsd, scheduledFor, null, "reserved", null);
+      INSERT INTO strategy_executions (strategy_id, watcher_id, kind, amount_usd, scheduled_for, tx_hash, status, error, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(strategyId, watcherId, kind, amountUsd, scheduledFor, null, "reserved", null, strategy.user_id ?? null); // owner = the plan owner (was NULL → startup backfill stamped it to the admin)
     const updates = kind === "scheduled"
       ? "reserved_budget_usd = reserved_budget_usd + ?, last_scheduled_at = datetime('now'), next_scheduled_at = datetime(next_scheduled_at, '+' || cadence_minutes || ' minutes'), updated_at = datetime('now')"
       : "reserved_budget_usd = reserved_budget_usd + ?, last_dip_at = datetime('now'), updated_at = datetime('now')";

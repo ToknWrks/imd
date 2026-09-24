@@ -58,6 +58,9 @@ async function analyze(hash) {
   // 1. UserOperation success for any of the user's wallets
   const uo = rc.logs.find((l) => l.topics[0] === USER_OP_EVENT && own.has("0x" + String(l.topics[2]).slice(26).toLowerCase()));
   const uoFailed = uo ? BigInt("0x" + uo.data.slice(66, 130)) !== 1n : false;
+  // 1b. Plain (non-UserOperation) tx that reverted on-chain — e.g. DIRECT SIGN
+  // from the owner EOA. No logs, nothing moved (VANGUARD #72/#73).
+  const txReverted = rc.status !== "success";
   // 3. token Transfer logs touching the user's wallets
   const tok = rc.logs.filter((l) => l.address.toLowerCase() === tokenLc && l.topics[0] === TRANSFER)
     .map((l) => ({ from: "0x" + l.topics[1].slice(26).toLowerCase(), to: "0x" + l.topics[2].slice(26).toLowerCase(), v: BigInt(l.data) }))
@@ -66,7 +69,7 @@ async function analyze(hash) {
   let net = 0n;
   for (const t of tok) { if (own.has(t.to)) net += t.v; if (own.has(t.from)) net -= t.v; }
   const leg = native.get(hash) ?? { out: 0, in: 0 };
-  return { uoFailed, selfTransfer, netToken: Number(net) / 1e18, ethIn: leg.in - leg.out, ethOut: leg.out - leg.in };
+  return { uoFailed, txReverted, selfTransfer, netToken: Number(net) / 1e18, ethIn: leg.in - leg.out, ethOut: leg.out - leg.in };
 }
 
 const db = new Database("data/accumulate.db", { readonly: !APPLY });
@@ -76,12 +79,19 @@ for (const r of rows) {
   if (r.status !== "ok") continue;
   let a;
   try { a = await analyze(r.buy_tx_hash); } catch (e) { console.log(`#${r.id} ${r.buy_tx_hash.slice(0, 10)} analyze failed: ${e.message}`); continue; }
-  const isSellRow = /^(SELL|PROBE|AUTOSELL)/.test(String(r.dex || ""));
+  const isSellRow = /^(SELL|PROBE|AUTOSELL)/.test(String(r.dex || "")) || /\(sell\)/i.test(String(r.dex || ""));
   const f = { id: r.id, tx: r.buy_tx_hash.slice(0, 12), dex: r.dex, before: { status: r.status, eth_spent: r.eth_spent, eth_received: r.eth_received, token_amount: r.token_amount } };
   if (a.uoFailed) f.after = { status: "error", eth_received: null, error: "smart-wallet UserOperation reverted on-chain (repair 2026-09-24)" };
+  else if (a.txReverted) f.after = { status: "error", eth_received: null, error: "transaction reverted on-chain — nothing traded (repair 2026-09-24)" };
   else if (a.selfTransfer) f.after = { status: "transfer", error: "move between the user's own wallets — not a trade (repair 2026-09-24)" };
-  else if (isSellRow && a.netToken < 0 && a.ethIn > 0 && Math.abs((r.eth_received ?? -1) - a.ethIn) > 1e-12) f.after = { eth_received: a.ethIn };
-  else if (!isSellRow && a.netToken > 0 && a.ethOut > 0 && (r.eth_spent == null || Math.abs(r.eth_spent - a.ethOut) > 1e-12)) f.after = { eth_spent: a.ethOut };
+  else {
+    const after = {};
+    if (isSellRow && a.netToken < 0 && a.ethIn > 0 && Math.abs((r.eth_received ?? -1) - a.ethIn) > 1e-12) after.eth_received = a.ethIn;
+    if (!isSellRow && a.netToken > 0 && a.ethOut > 0 && (r.eth_spent == null || Math.abs(r.eth_spent - a.ethOut) > 1e-12)) after.eth_spent = a.ethOut;
+    // Missing token quantity on a successful trade → fill from the Transfer logs.
+    if (r.token_amount == null && a.netToken !== 0) after.token_amount = Math.abs(a.netToken);
+    if (Object.keys(after).length) f.after = after;
+  }
   if (f.after) fixes.push(f);
 }
 for (const f of fixes) console.log(`#${f.id} ${f.tx} [${f.dex}]\n    before ${JSON.stringify(f.before)}\n    after  ${JSON.stringify(f.after)}`);
