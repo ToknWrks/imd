@@ -465,8 +465,10 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
   }
 
   if (url === "/api/sniper/sell" && method === "POST") {
+    let _sellBody = null;
     try {
-      const { chain, token, sellPct, slippagePct, maxGasGwei, pool } = JSON.parse(await readBody());
+      _sellBody = JSON.parse(await readBody());
+      const { chain, token, sellPct, slippagePct, maxGasGwei, pool } = _sellBody;
       if (!token?.match(/^0x[0-9a-fA-F]{40}$/)) { json({ ok: false, error: "invalid token address" }); return true; }
       const chainKey = chain || "ethereum";
       // Per-user signer (2026-09-20) — same rule as the buy route. resolveSignerUser
@@ -526,7 +528,23 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       }
       json({ ok: true, ...result });
       return true;
-    } catch (e) { json({ ok: false, error: e.message }); return true; }
+    } catch (e) {
+      // Persist the failure (2026-09-24): failed sniper sells used to exist
+      // only as a toast in the browser — nothing on the Trades page, nothing
+      // to diagnose from. status='error' rows are excluded from P/L (the
+      // ledger reads status='ok' only).
+      try {
+        const body = typeof _sellBody === "object" && _sellBody ? _sellBody : {};
+        if (body.token && /^0x[0-9a-fA-F]{40}$/.test(body.token)) {
+          insertSniperTrade({
+            chain: body.chain || "ethereum", contract_address: String(body.token).toLowerCase(), symbol: null,
+            dex: "SELL (failed)", eth_spent: 0, token_amount: null, buy_tx_hash: e.txHash ?? null,
+            status: "error", error: String(e.message || e).slice(0, 500), eth_received: null, user_id: uid,
+          });
+        }
+      } catch (logErr) { console.error("[sniper] failed to persist sell error row:", logErr.message); }
+      json({ ok: false, error: e.message }); return true;
+    }
   }
 
   // Migrate this token from Sniper to Accumulation: ensure a dip_watcher row
@@ -583,7 +601,7 @@ export async function handleSniperRequest(url, method, { readBody, json, send, s
       // between a user's own SCW and EOA).
       const per = [];
       for (const w of wallets) {
-        per.push(await syncExternalTrades({ chainKey, tokenAddress: token, wallet: w, userId: uid }));
+        per.push(await syncExternalTrades({ chainKey, tokenAddress: token, wallet: w, userId: uid, ownWallets: wallets }));
       }
       const r = per.reduce((acc, x) => ({ added: acc.added + x.added, skipped: acc.skipped + x.skipped }), { added: 0, skipped: 0 });
       json({ ok: true, wallets, ...r });

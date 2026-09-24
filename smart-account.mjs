@@ -239,7 +239,39 @@ export async function buildSmartAccountSigner(chainKey = "ethereum", { sessionKe
         uo: { target: contractAddress, data, value: value ?? 0n },
         overrides: { callGasLimit: { multiplier: 1.5 } },
       });
-      return client.waitForUserOperationTransaction({ hash });
+      const txHash = await client.waitForUserOperationTransaction({ hash });
+      // A UserOperation can REVERT inside a bundle transaction that itself
+      // succeeds — receipt.status is the BUNDLE's status, not ours. Read the
+      // EntryPoint's UserOperationEvent for THIS userOpHash and throw on
+      // success=false, so every caller (sniper, exit, dip, autosell) sees a
+      // failed trade as a failure. (2026-09-24: sell 0xe140af81… reverted in
+      // the hook but was recorded "ok" with 0.0025 ETH proceeds.)
+      await assertUserOpSucceeded(publicClient, txHash, hash);
+      return txHash;
     },
   };
+}
+
+const USER_OP_EVENT = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
+const USER_OP_REVERT_REASON = "0x1c4fada7374c0a9ee8841fc38afe82932dc0f8e69012e927f061a8bae611a201";
+
+/** Throw when the UserOperation `userOpHash` inside bundle tx `txHash` reverted. */
+export async function assertUserOpSucceeded(publicClient, txHash, userOpHash) {
+  const rc = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  const want = String(userOpHash).toLowerCase();
+  const ev = rc.logs.find((l) => l.topics?.[0] === USER_OP_EVENT && String(l.topics[1]).toLowerCase() === want);
+  if (!ev) return; // not found (non-standard bundle) — fall back to bundle status checks downstream
+  const success = BigInt("0x" + ev.data.slice(2 + 64, 2 + 128)) === 1n;
+  if (success) return;
+  const rr = rc.logs.find((l) => l.topics?.[0] === USER_OP_REVERT_REASON && String(l.topics[1]).toLowerCase() === want);
+  let reason = "";
+  if (rr) {
+    const hex = rr.data;
+    if (hex.includes("a9e35b2f")) reason = " — pool hook call failed (HookCallFailed)";
+    else if (hex.includes("08c379a0")) reason = " — " + (hex.match(/08c379a0.{128}(.*)/)?.[1] ? "reverted with a reason string" : "reverted");
+    else reason = " — revert data " + hex.slice(0, 74) + "…";
+  }
+  const err = new Error(`smart-wallet transaction reverted on-chain (tx ${txHash})${reason}`);
+  err.txHash = txHash;
+  throw err;
 }

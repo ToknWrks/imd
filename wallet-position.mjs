@@ -70,6 +70,41 @@ async function fetchTransfers({ contractAddress, walletAddress, direction, chain
   return transfers.slice(0, MAX_TRANSFERS);
 }
 
+/** Native ETH legs (external + INTERNAL) per tx for one wallet. Smart-wallet
+ *  trades pay/receive ETH as internal calls inside the EntryPoint bundle —
+ *  neither msg.value of the bundle tx (that's the bundler's) nor an ERC-20
+ *  transfer. Without this every SCW buy had "no counter-transfer", was
+ *  excluded from the average, and the watcher showed no avg cost (IMD,
+ *  2026-09-24). Returns Map(hash -> { out, in }) in ETH. */
+async function fetchNativeEthLegs({ walletAddress, chainKey = "ethereum" }) {
+  const url = alchemyUrl(chainKey);
+  const sums = new Map();
+  for (const dir of ["fromAddress", "toAddress"]) {
+    let pageKey, n = 0;
+    do {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "alchemy_getAssetTransfers", params: [{
+          fromBlock: "0x0", toBlock: "latest", category: ["external", "internal"], withMetadata: false,
+          order: "asc", maxCount: "0x3e8", [dir]: walletAddress, ...(pageKey ? { pageKey } : {}),
+        }] }),
+      });
+      const body = await res.json();
+      if (body.error) throw new Error(`alchemy_getAssetTransfers (native): ${body.error.message}`);
+      for (const t of body.result.transfers) {
+        const v = Number(t.value ?? 0);
+        if (!(v > 0)) continue;
+        const e = sums.get(t.hash) ?? { out: 0, in: 0 };
+        if (dir === "fromAddress") e.out += v; else e.in += v;
+        sums.set(t.hash, e);
+        n++;
+      }
+      pageKey = body.result.pageKey;
+    } while (pageKey && n < MAX_TRANSFERS);
+  }
+  return sums;
+}
+
 /** Retries a flaky RPC call — Robinhood chain's public/archive endpoints are
  *  rate-limited and occasionally drop requests (see CLAUDE.md). Without this,
  *  a single transient failure silently zeroes out that block's price and can
@@ -195,12 +230,23 @@ export async function computeWalletPosition({ contractAddress, decimals, walletA
   // Cost-basis transfer scan across EVERY read wallet (2026-09-19) — same
   // rationale as the balance sum: acquisitions/exits via the launchpad hit
   // the EOA; app-signed trades hit the SCW. Merge both wallets' histories.
-  const transferLists = await Promise.all(
-    wallets.flatMap((w) => [
-      fetchTransfers({ contractAddress, walletAddress: w, direction: "in", chainKey }),
-      fetchTransfers({ contractAddress, walletAddress: w, direction: "out", chainKey }),
-    ])
-  );
+  const [transferLists, nativeLegLists] = await Promise.all([
+    Promise.all(
+      wallets.flatMap((w) => [
+        fetchTransfers({ contractAddress, walletAddress: w, direction: "in", chainKey }),
+        fetchTransfers({ contractAddress, walletAddress: w, direction: "out", chainKey }),
+      ])
+    ),
+    Promise.all(wallets.map((w) => fetchNativeEthLegs({ walletAddress: w, chainKey }).catch(() => new Map()))),
+  ]);
+  // Merge native legs across the user's wallets. A tx moving ETH between the
+  // user's OWN wallets would show both an out and an in — net them per tx.
+  const nativeLegs = new Map();
+  for (const m of nativeLegLists) for (const [h, v] of m) {
+    const e = nativeLegs.get(h) ?? { out: 0, in: 0 };
+    e.out += v.out; e.in += v.in;
+    nativeLegs.set(h, e);
+  }
   const seenTxs = new Set();
   const incoming = [];
   const outgoing = [];
@@ -265,6 +311,12 @@ export async function computeWalletPosition({ contractAddress, decimals, walletA
   const needsEthCheck = txs.filter((tx) => tx.tokenIn > 0 && tx.usdcOut === 0 && tx.wethOut === 0);
   const ethValues = new Map(); // hash -> native ETH sent in that tx
   await mapLimit(needsEthCheck, CONCURRENCY, async (tx) => {
+    // Native ETH that LEFT the user's wallets in this tx (covers SCW internal
+    // calls). msg.value is only a fallback — for a UserOperation it is the
+    // bundler's tx value (0), not the user's spend.
+    const leg = nativeLegs.get(tx.hash);
+    const netOut = leg ? leg.out - leg.in : 0;
+    if (netOut > 0) { ethValues.set(tx.hash, netOut); return; }
     try { ethValues.set(tx.hash, await getTxEthValue(tx.hash, chainKey)); }
     catch { ethValues.set(tx.hash, 0); }
   });
@@ -287,11 +339,21 @@ export async function computeWalletPosition({ contractAddress, decimals, walletA
   const needsExitEthCheck = txs.filter((tx) => tx.tokenOut > 0 && tx.usdcIn === 0 && tx.wethIn === 0);
   const exitEthValues = new Map(); // hash -> native ETH received in that tx
   await mapLimit(needsExitEthCheck, CONCURRENCY, async (tx) => {
+    // Native ETH that ARRIVED in the user's wallets in this tx (internal
+    // transfer from a V4 TAKE / hook-router). Covers SCW sells directly.
+    const leg = nativeLegs.get(tx.hash);
+    const netIn = leg ? leg.in - leg.out : 0;
+    if (netIn > 0) { exitEthValues.set(tx.hash, netIn); return; }
     try {
       // DELIVERED eth (balance delta), not msg.value: V4 sells deliver via
-      // TAKE with msg.value=0, so the old read saw every V4 exit as $0
-      // proceeds and excluded it from realized P/L entirely.
-      exitEthValues.set(tx.hash, await getTxDeliveredEth(tx.hash, walletAddress, chainKey));
+      // TAKE with msg.value=0. Read against the wallet that actually held
+      // the tokens (walletAddress was undefined for multi-wallet callers).
+      let best = 0;
+      for (const w of wallets) {
+        const d = await getTxDeliveredEth(tx.hash, w, chainKey).catch(() => 0);
+        if (d > best) best = d;
+      }
+      exitEthValues.set(tx.hash, best);
     }
     catch { exitEthValues.set(tx.hash, 0); }
   });

@@ -16,7 +16,7 @@
  */
 import { getChain } from "./chains.mjs";
 import { getEthUsdPrice } from "./dip-swap.mjs";
-import { insertSniperTrade, getSniperTokenHistory, getSniperTokenHistoryUnpriced } from "./db.mjs";
+import { insertSniperTrade, getSniperTxHashes } from "./db.mjs";
 import { createPublicClient, http, decodeEventLog, parseAbi, getAddress, formatUnits } from "viem";
 
 const ERC20_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
@@ -24,12 +24,16 @@ const ERC20_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"
 const ALCHEMY_SUBDOMAIN = { ethereum: "eth-mainnet", base: "base-mainnet", robinhood: "robinhood-mainnet" };
 const MAX_TRANSFERS = 2000;
 
-/** Decode a V4 Swap event: proceeds = the pool's negative delta (quote side).
- *  Pool-perspective deltas: for a sell, the pool RECEIVES the sold token
- *  (positive delta) and PAYS the quote (negative delta) → proceeds = |neg|.
- *  The caller passes tokenAmountRaw so the token side can be identified by
- *  magnitude match (handles both currency orders); if neither side matches,
- *  falls back to the negative side (sell direction is unambiguous). */
+/** ETH proceeds of a SELL from the V4 PoolManager Swap event.
+ *  v4 Swap amounts are from the SWAPPER's perspective (verified on-chain
+ *  2026-09-24, tx 0x2932b99e: a 1-IMD sell logged amount1(IMD) = -1e18 and
+ *  amount0(ETH) = +1.98e15). So on a sell the TOKEN side is NEGATIVE (paid by
+ *  the swapper) and the QUOTE side is POSITIVE (received). The old decoder
+ *  assumed pool perspective and returned the token quantity as "ETH" —
+ *  recording 1 ETH of proceeds for a 1-IMD sell. Only ETH-quoted pools
+ *  (currency0 = native ETH) return a value; anything else returns null.
+ *  tokenAmountRaw (bigint, optional) disambiguates when several Swap events
+ *  are in the receipt. */
 async function v4SwapProceedsEth(txHash, chainKey, tokenAmountRaw) {
   const dep = getChain(chainKey);
   const key = process.env.ALCHEMY_API_KEY?.trim();
@@ -37,35 +41,24 @@ async function v4SwapProceedsEth(txHash, chainKey, tokenAmountRaw) {
   const sub = { ethereum: "eth-mainnet", base: "base-mainnet", robinhood: "robinhood-mainnet" }[chainKey] ?? "eth-mainnet";
   const c = createPublicClient({ transport: http(`https://${sub}.g.alchemy.com/v2/${key}`) });
   const r = await c.getTransactionReceipt({ hash: txHash });
+  const raw = typeof tokenAmountRaw === "bigint" ? tokenAmountRaw : null;
+  let fallback = null;
   for (const log of r.logs) {
     if (log.address.toLowerCase() !== String(dep.v4?.poolManager ?? "").toLowerCase()) continue;
+    let ev;
     try {
-      const ev = decodeEventLog({
-        abi: parseAbi(["event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 protocolFee)"]),
+      ev = decodeEventLog({
+        abi: parseAbi(["event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)"]),
         data: log.data, topics: log.topics,
       });
-      const a0 = ev.args.amount0, a1 = ev.args.amount1;
-      // Identify the token side by matching the actual transferred amount.
-      if (tokenAmountRaw != null) {
-        if (a0 > 0n && BigInt(a0) === tokenAmountRaw) return Number(-a1) / 1e18; // token=c0 → proceeds=c1
-        if (a1 > 0n && BigInt(a1) === tokenAmountRaw) return Number(-a0) / 1e18; // token=c1 → proceeds=c0
-      }
-      // The negative side is what the pool PAID — on a SELL that must be the
-      // QUOTE (currency0/1 that is NOT our token). If the negative side is the
-      // token itself, the "sell" was actually a BUY routed through flash
-      // accounting (pool pays the token to the wallet while receiving the
-      // quote) — returning the token quantity as "ETH proceeds" recorded
-      // 139.0 ETH for a 0.02 ETH sell (HASH, 2026-09-13).
-      const neg = a0 < 0n ? a0 : a1 < 0n ? a1 : null;
-      if (neg == null) return null;
-      const tokenSideIsNeg = tokenAmountRaw != null && (BigInt(a0) === tokenAmountRaw || BigInt(a1) === tokenAmountRaw)
-        ? (a0 < 0n && BigInt(-a0) === tokenAmountRaw) || (a1 < 0n && BigInt(-a1) === tokenAmountRaw)
-        : null;
-      if (tokenSideIsNeg) return null; // negative side IS the token — this is a buy, proceeds unknown here
-      return Number(-neg) / 1e18;
     } catch { continue; }
+    const a0 = BigInt(ev.args.amount0), a1 = BigInt(ev.args.amount1);
+    // ETH pools: currency0 = native ETH. Sell ⇒ a1 (token) < 0, a0 (ETH) > 0.
+    if (!(a1 < 0n && a0 > 0n)) continue;
+    if (raw != null && -a1 === raw) return Number(a0) / 1e18; // exact match
+    if (fallback == null) fallback = Number(a0) / 1e18;
   }
-  return null;
+  return raw == null ? fallback : null;
 }
 
 function alchemyUrl(chainKey) {
@@ -74,7 +67,10 @@ function alchemyUrl(chainKey) {
   return `https://${ALCHEMY_SUBDOMAIN[chainKey] ?? "eth-mainnet"}.g.alchemy.com/v2/${key}`;
 }
 
-/** All erc20 transfers in/out of the wallet among {token, dollar, weth}. */
+/** All erc20 transfers in/out of the wallet among {token, dollar, weth}.
+ *  (Native ETH legs are fetched separately by fetchNativeEth — smart-wallet
+ *  trades move ETH as INTERNAL transfers, which never appear as msg.value
+ *  of the bundle tx or as ERC-20 transfers.) */
 async function fetchTransfers({ chainKey, token, wallet, direction }) {
   const dep = getChain(chainKey);
   const url = alchemyUrl(chainKey);
@@ -97,11 +93,43 @@ async function fetchTransfers({ chainKey, token, wallet, direction }) {
   return out.slice(0, MAX_TRANSFERS);
 }
 
+/** Native ETH (external + internal) sent FROM / received BY the wallet, keyed
+ *  by tx hash. Smart-wallet trades pay/receive ETH via internal calls inside
+ *  the EntryPoint bundle, so this is the only place their cost/proceeds show. */
+async function fetchNativeEth({ chainKey, wallet }) {
+  const url = alchemyUrl(chainKey);
+  const sums = new Map(); // hash -> { out, in }
+  for (const dir of ["fromAddress", "toAddress"]) {
+    let pageKey, n = 0;
+    do {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "alchemy_getAssetTransfers", params: [{
+          fromBlock: "0x0", toBlock: "latest", category: ["external", "internal"], order: "asc", maxCount: "0x3e8",
+          [dir]: wallet, ...(pageKey ? { pageKey } : {}),
+        }] }),
+      });
+      const body = await res.json();
+      if (body.error) throw new Error(`alchemy_getAssetTransfers (native): ${body.error.message}`);
+      for (const t of body.result.transfers) {
+        const v = Number(t.value ?? 0);
+        if (!(v > 0)) continue;
+        const e = sums.get(t.hash) ?? { out: 0, in: 0 };
+        if (dir === "fromAddress") e.out += v; else e.in += v;
+        sums.set(t.hash, e);
+        n++;
+      }
+      pageKey = body.result.pageKey;
+    } while (pageKey && n < MAX_TRANSFERS);
+  }
+  return sums;
+}
+
 /**
  * Reconcile external trades for one token into sniper_trades.
  * Returns { added, skipped } — added rows carry dex="EXT (wallet sync)".
  */
-export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userId = null }) {
+export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userId = null, ownWallets = null }) {
   const dep = getChain(chainKey);
   const token = String(tokenAddress).toLowerCase();
   const ethUsd = await getEthUsdPrice(chainKey).catch(() => null);
@@ -109,9 +137,10 @@ export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userI
   // retryCount 1 so a flaky RPC degrades to the transfer-direction fallback.
   const c = createPublicClient({ chain: dep.viemChain, transport: http(dep.httpRpc(), { batch: false, retryCount: 1 }) });
 
-  const [inT, outT] = await Promise.all([
+  const [inT, outT, nativeEth] = await Promise.all([
     fetchTransfers({ chainKey, token, wallet, direction: "in" }),
     fetchTransfers({ chainKey, token, wallet, direction: "out" }),
+    fetchNativeEth({ chainKey, wallet }).catch(() => new Map()),
   ]);
   const byTx = new Map();
   for (const t of [...inT, ...outT]) {
@@ -119,17 +148,24 @@ export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userI
     byTx.get(t.hash).push(t);
   }
 
-  const known = new Set(getSniperTokenHistory(chainKey, token, userId).map((t) => String(t.buy_tx_hash || "").toLowerCase()));
-  // Rows with NO price info (eth_spent AND eth_received NULL) are excluded
-  // from getSniperTokenHistory's priced-only filter — track them separately
-  // or a re-sync re-inserts them as priced duplicates (HASH buy 0xeedd4c58
-  // existed as an unpriced row from the old sync bug; re-sync added it again
-  // with cost, double-counting the position).
-  const knownUnpriced = new Set(getSniperTokenHistoryUnpriced(chainKey, token, userId).map((t) => String(t.buy_tx_hash || "").toLowerCase()));
+  // Dedupe on EVERY recorded hash, any status (see getSniperTxHashes).
+  const known = getSniperTxHashes(chainKey, token);
+  // The user's own wallets (SCW + login EOA). A tx that only moves the token
+  // between them is a TRANSFER, not a trade — recording it made withdrawals
+  // look like sells for ~0 ETH and deposits like unpriced buys (IMD ledger,
+  // 2026-09-24: rows 79/80/96 were SCW→EOA withdrawals booked as sells).
+  const own = new Set([wallet, ...(ownWallets ?? [])].filter(Boolean).map((a) => String(a).toLowerCase()));
   let added = 0, skipped = 0;
 
   for (const [tx, transfers] of byTx) {
-    if (known.has(tx.toLowerCase()) || knownUnpriced.has(tx.toLowerCase())) { skipped++; continue; }
+    if (known.has(tx.toLowerCase())) { skipped++; continue; }
+    // Self-transfer between the user's own wallets → not a trade.
+    {
+      const tokTransfers = transfers.filter((t) => String(t.rawContract?.address ?? "").toLowerCase() === token);
+      if (own.size > 1 && tokTransfers.length && tokTransfers.every((t) => own.has(String(t.from).toLowerCase()) && own.has(String(t.to).toLowerCase()))) {
+        skipped++; continue;
+      }
+    }
     const tokenLc = token.toLowerCase();
     const tokenOut = transfers.filter((t) => t.dir === "out" && String(t.rawContract?.address ?? "").toLowerCase() === tokenLc);
     const tokenIn = transfers.filter((t) => t.dir === "in" && String(t.rawContract?.address ?? "").toLowerCase() === tokenLc);
@@ -178,9 +214,10 @@ export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userI
     if (isSell) {
       const dollarAmt = dollarIn.reduce((s, t) => s + Number(t.value ?? 0), 0);
       const wethAmt = wethIn.reduce((s, t) => s + Number(t.value ?? 0), 0);
+      const nativeIn = nativeEth.get(tx)?.in ?? 0;
       if (dollarAmt > 0 && ethUsd > 0) ethReceived = dollarAmt / ethUsd;
       else if (wethAmt > 0) ethReceived = wethAmt;
-      if (ethReceived == null) ethReceived = await v4SwapProceedsEth(tx, chainKey, tokenLc).catch(() => null);
+      else if (nativeIn > 0) ethReceived = nativeIn; // SCW / native TAKE proceeds (internal transfer)
       // Some V4 pools settle through a WETH-side route that unwraps to native
       // ETH (TAKE → internal transfer): no PoolManager Swap event decodable
       // under the canonical PoolManager and no ERC-20 transfer. Measure the
@@ -206,8 +243,10 @@ export async function syncExternalTrades({ chainKey, tokenAddress, wallet, userI
         : [];
       const wethAmt = wethOut.reduce((s, t) => s + Number(t.value ?? 0), 0);
       const dollarAmt = dollarOut.reduce((s, t) => s + Number(t.value ?? 0), 0);
+      const nativeOut = nativeEth.get(tx)?.out ?? 0;
       if (wethAmt > 0) ethSpent = wethAmt;
       else if (dollarAmt > 0 && ethUsd > 0) ethSpent = dollarAmt / ethUsd;
+      else if (nativeOut > 0) ethSpent = nativeOut; // SCW buys: ETH leaves as internal transfers
       // Native-ETH buy: the wallet attached ETH to the tx (msg.value) — the
       // transfers API never shows it, but for an external router swap
       // msg.value IS the cost (IF native buys, 2026-09-14: 0.002 ETH each,

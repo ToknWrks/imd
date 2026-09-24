@@ -737,6 +737,16 @@ export function getSniperTokenHistory(chain, contractAddress, userId = null) {
   `).all(...(userId ? [chain, String(contractAddress).toLowerCase(), userId] : [chain, String(contractAddress).toLowerCase()]));
 }
 
+/** Every tx hash recorded for a token (ANY status: ok, error, transfer) —
+ *  wallet-sync's dedupe set. Status-filtered sets let corrected rows
+ *  (e.g. re-labeled status='transfer') be re-inserted as trades on the next sync. */
+export function getSniperTxHashes(chain, contractAddress) {
+  return new Set(db.prepare(`
+    SELECT LOWER(buy_tx_hash) AS h FROM sniper_trades
+    WHERE chain = ? AND contract_address = ? AND buy_tx_hash IS NOT NULL
+  `).all(chain, String(contractAddress).toLowerCase()).map((r) => r.h));
+}
+
 /** ALL rows for a token INCLUDING unpriced ones (eth_spent AND eth_received
  *  both NULL). wallet-sync's dedupe must see these too — a tx recorded
  *  unpriced by an older sync must not be re-inserted as a priced duplicate

@@ -2316,7 +2316,7 @@ if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POS
         const { syncExternalTrades } = await import("./wallet-sync.mjs");
         const per = [];
         for (const w of wallets) {
-          per.push(await syncExternalTrades({ chainKey, tokenAddress: watcher.contract_address, wallet: w, userId: uid }));
+          per.push(await syncExternalTrades({ chainKey, tokenAddress: watcher.contract_address, wallet: w, userId: uid, ownWallets: wallets }));
         }
         const totals = per.reduce((acc, x) => ({ added: acc.added + x.added, skipped: acc.skipped + x.skipped }), { added: 0, skipped: 0 });
         await computeAndStorePosition(watcher); // fresh balance + P/L after import
