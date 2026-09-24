@@ -95,6 +95,37 @@ above cost basis) and executed by the loop in `sniper-autosell.mjs`
 position value (ETH) ≥ `cost_at_arm_eth × (1 + target_pct/100)`. A hit sells
 100% — subject to the same precision fix above.
 
+## Ledger repair — `scripts/repair-sniper-ledger.mjs` (2026-09-24)
+
+Re-derives one user's `sniper_trades` rows for one token from on-chain truth.
+
+```bash
+node --env-file=.env scripts/repair-sniper-ledger.mjs <userId> <token>          # dry run (read-only DB handle)
+node --env-file=.env scripts/repair-sniper-ledger.mjs <userId> <token> --apply  # writes — back up data/ FIRST
+```
+
+Fixes, per `status='ok'` row with a tx hash:
+1. Smart-wallet UserOperation reverted → `status='error'`
+2. **Plain tx reverted** (e.g. `DIRECT SIGN` from the owner EOA — no
+   UserOperation, receipt `status != success`) → `status='error'` *(added
+   `b9662ca`; the first version missed these)*
+3. Transfer between the user's own wallets → `status='transfer'`
+4. Sell proceeds wrong (V4 decode stored the TOKEN quantity as ETH) → real
+   ETH from native/internal transfer legs. Sell rows = `SELL|PROBE|AUTOSELL`
+   prefix **or** `(sell)` in `dex`.
+5. Buy cost NULL/wrong → ETH out from transfer legs
+6. **`token_amount` NULL on a successful trade** → net token Transfer *(added
+   `b9662ca`)*
+
+Applied so far: IMD (12 rows, 0/44 left), VANGUARD (7 rows for `0xa71f…`,
+1 for `0x79c0…`; 0 left for both). Worst one: VANGUARD #66, a sell recorded
+at 0.3383 ETH that really paid 0.000622 ETH (≈544×) — realized P/L went from
++0.338 ETH to +0.00016 ETH. Other watched tokens ($BLD, PEPESWARM, FWAI,
+ICE, BALLOON) have no `sniper_trades` rows — nothing to repair.
+
+Limits: assumes 18 decimals; Alchemy free tier caps `eth_getLogs` at 10
+blocks, so the script uses `alchemy_getAssetTransfers` + receipts instead.
+
 ## Migrating to Accumulate
 
 `/api/sniper/migrate` creates a dormant `dip_watchers` row (no plan, no

@@ -24,7 +24,9 @@ see `CLAUDE.md` § Trading modes.
 2. `dip-watcher.mjs` resolves the best venue: **V4 first** (Dexscreener venue
    list → on-chain StateView verification → poolId→poolKey derivation; V4
    uses native ETH as currency0), falling back to V3 (deepest fee tier). A
-   manual pool override wins when set.
+   manual pool override wins when set. **IMD launchpad curve coins** (any
+   token the launchpad indexer knows — VANGUARD, $BLD, …; never IMD itself)
+   skip AMM discovery entirely — see § Curve coins below.
 3. WebSocket subscription: V3 pools directly; V4 through the singleton
    PoolManager with the poolId as topic filter. Sell detection: ETH-in/
    token-out deltas, USD-sized via the chain's ETH/USD price source.
@@ -36,6 +38,42 @@ see `CLAUDE.md` § Trading modes.
    reservation is transactional (overlaps/restarts can't double-spend). A
    budget/allocation-exhausted error auto-pauses the strategy — it never
    frees itself on its own.
+
+## Curve coins — dip detection on the launchpad curve (as-built 2026-09-24, commit `5df181a`)
+
+Launchpad coins have **no AMM pool that matters**: the launchpad hook
+(`0x51768F…2888`) settles every trade itself. Before this fix VANGUARD logged
+`Failed to subscribe VANGUARD: no V4 pool found…` every 30s (23k+ lines — no
+dip buy could ever fire, for any user), and $BLD watched a $764 unhooked side
+pool that never sees the real sells.
+
+- **Detection:** `subscribe()` checks `getCurveCoinState()` (launchpad
+  indexer) first; if the token is a curve coin it subscribes to the hook's
+  `CurveSwap(bytes32 indexed poolId, address indexed trader, address indexed
+  router, bool buy, uint256 ethAmount, uint256 imdAmount, uint256 coinAmount,
+  uint256 creatorFee, uint256 burnFee)` filtered by `deriveCurvePoolId(token)`.
+  Topic0 `0x4e041a3c…`. Layout verified against real txs: VANGUARD sell
+  `0xb633e410…` decodes `buy=false, ethAmount=0.000622 ETH, coin=50,000`.
+- **Sell = `buy === false`**; `ethAmount` is the ETH paid to the seller →
+  USD via `getEthUsdPrice`. Same threshold / cooldown / plan-reservation /
+  alert semantics as every other handler (`handleCurveSwap`).
+- **Execution is explicitly on the curve** (`buyCurveCoin` with fresh curve
+  state + `getImdPerEth`) — NOT `buyToken()`'s auto-discovery, which would
+  pick a tiny unhooked side pool when one exists ($BLD).
+- Log line to look for: `Watching VANGUARD on Ethereum — IMD launchpad curve
+  pool 0xc2c8…1ccf`. $BLD curve pool: `0x2a93…cecc`.
+- A manual `pool_address` override still wins; IMD itself is excluded (it is
+  pinned to the `b07d` V4 pool — see `buy-sell-imd.md`).
+- Big curve sells are rare (VANGUARD: 2 sells lifetime) — no dip buys for a
+  while is expected, not a bug.
+
+## Plan / watcher fallback
+
+When a plan's `end_at` passes it is ignored by every handler — dip detection
+falls back to the **watcher row's own** `threshold_usd` / `buy_amount_usd`,
+and scheduled buys stop (scheduled `next_scheduled_at` past `end_at` never
+fires). An "active" plan in the UI can therefore be silently expired —
+check `end_at` first when a plan "isn't buying".
 
 ## Manual exit (`/api/watchers/:id/exit`, `buildSellTx` in `dashboard.mjs`)
 
