@@ -61,18 +61,6 @@ window.directSignTrade = async function(route, body, setStatus) {
     var r = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     var j = await r.json();
     if (!j.ok || !j.directSign) return j;
-    if (j.permitTypedData) {
-      // IMD→ETH beta (2026-09-23): stage 1 is a FREE EIP-712 signature (the
-      // per-trade Permit2 permit) — not a transaction, no gas. Sign it here,
-      // then re-POST the SAME body with the signature embedded; the server
-      // builds the final execute() calldata around it and returns the tx.
-      if (!window.ethereum) throw new Error('no browser wallet found');
-      setStatus('signing the permit (free, no gas)…');
-      var sig = await window.ethereum.request({ method: 'eth_signTypedData_v4', params: [window.ethereum.selectedAddress || (await window.ethereum.request({ method: 'eth_requestAccounts' }))[0], JSON.stringify(j.permitTypedData)] });
-      setStatus('building the swap…');
-      body.permitSignature = { sig: sig, deadline: j.permitTypedData.message.sigDeadline, expiration: j.permitTypedData.message.details.expiration, nonce: j.permitTypedData.message.details.nonce };
-      continue;
-    }
     if (j.directSign.isApproval) {
       setStatus('approving token spend (' + (step + 1) + ')…');
       var approveHash = await window.directSignTx(j.directSign);

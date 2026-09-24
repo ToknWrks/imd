@@ -1,205 +1,154 @@
 /**
- * v4-hook-sell.mjs — IMD V4 sell into the HOOKED pool (the launchpad trading pool),
- * mirroring the Uniswap UI's proven two-command flow:
+ * v4-hook-sell.mjs — THE IMD sell path: IMD → native ETH through the hooked
+ * ETH/IMD V4 pool (the pool the Uniswap UI trades), executed by the launchpad's
+ * hook-router 0x2361…DE85 (NOT the Universal Router — the UR reverts here).
  *
- *   execute(commands "0x0a10", [permit2PermitInput, v4SwapInput])
+ * Every IMD sell (manual exit in autonomy AND co-pilot, sniper, autosell) goes
+ * through executeImdEthSell() via executeSniperSell(). IMD never sells to USDC.
  *
- * The launchpad hook requires the input token to be pulled via a per-trade
- * Permit2 permit (EIP-712, signed by the seller) with spender
- * 0x23617e59a5925b2a4bf75d73ff6711cd0b29de85 — a plain router allowance does
- * NOT satisfy this pool (found live 2026-09-23).
- *
- * Ground truth: the user's UI tx calldata (IMD 1.0 → 0.00212 ETH, pool
- * 0x415829f72e… fee 10000 ts 60 hook 0xc6c965bd…, hookData = seller).
- * Verification for this path is STRUCTURAL (viem-decode diff vs the UI blob) —
- * offline eth_call replay can't validate it because the permit leg carries a
- * signature the replay cannot produce.
+ * Ground truth (verified 2026-09-23/24 against tx 0x6fbc3188…, block 26036791):
+ *  - The swap tuple is the STANDARD v4-periphery ExactInputParams
+ *    { currencyIn, PathKey[] path, uint256[] maxHopSlippage, amountIn, amountOutMinimum }
+ *    — viem's ABI encoder reproduces the on-chain bytes exactly. The "word 16
+ *    mystery" was maxHopSlippage[0]; we send an empty array and rely on
+ *    amountOutMinimum.
+ *  - NO per-trade Permit2 permit is needed: a standing Permit2 allowance
+ *    (owner → IMD → hook-router) suffices. execute("0x10", [V4_SWAP]) with the
+ *    standing allowance simulates clean at full balance (357,835 gas).
+ *  - So the flow is the normal two-layer allowance chain, set ONCE:
+ *      IMD.approve(Permit2, max)  →  Permit2.approve(IMD, hookRouter, max, far-future)
+ *    both sent through signer.callContract — autonomy signs them itself (no
+ *    prompt); co-pilot gets them as staged direct-sign steps.
  */
-import { getAddress, encodeFunctionData, parseAbi, encodeAbiParameters, parseAbiParameters, parseUnits } from "viem";
-import { getChain } from "./chains.mjs";
+import { getAddress, parseAbi, parseAbiParameters, encodeAbiParameters } from "viem";
 
-const wn = (x) => BigInt(x).toString(16).padStart(64, "0");
-const addr = (a) => getAddress(a).slice(2).toLowerCase().padStart(64, "0");
-
-// From the UI's working sell (IMD/ETH hooked pool):
-// IMD token (the launchpad's reserve asset) — the only token this sell path supports.
 export const IMD = "0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7";
+export const HOOK_ROUTER = "0x23617e59A5925b2A4Bf75d73ff6711cD0b29De85";
+export const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 export const HOOKED_POOL = {
   poolId: "0x415829f72e9f54531c26eae76f107618540e898a45d6ae35959e143f5faca704",
+  currency0: "0x0000000000000000000000000000000000000000", // ETH
+  currency1: IMD,
   fee: 10000,
   tickSpacing: 60,
-  hooks: "0xC6C965BD164C483E87D0B550671798E9A3602840",
+  hooks: "0xc6C965Bd164c483e87d0B550671798e9A3602840",
 };
-export const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
-// The spender the hook's permit must approve (from the UI calldata, input[0] word4):
-export const HOOK_PERMIT_SPENDER = "0x23617E59A5925B2A4BF75D73FF6711CD0B29DE85";
-// The launchpad's V4 hook-router — this contract EXECUTES the sell (NOT the
-// Universal Router). Ground truth: tx 0x6fbc3188… (block 26036791) went here,
-// not to 0x66a9893c….
-export const HOOK_ROUTER = "0x23617E59A5925B2A4BF75D73FF6711CD0B29DE85";
-// sqrtPriceLimitX96 the working UI sell carried in the swap tuple's word 16
-// (clean on-chain bytes, tx 0x6fbc3188…). A price limit of 0 means "no limit";
-// the UI's value implies a bounded slippage for the IMD→ETH direction.
-export const SQRT_PRICE_LIMIT = 0x689bab3f3a37da09d5932db10000n;
+const ETH = "0x0000000000000000000000000000000000000000";
+const V4_QUOTER = "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203";
+const MAX_UINT160 = 2n ** 160n - 1n;
+const MAX_UINT48 = 2n ** 48n - 1n;
 
-const EXECUTE_ABI = parseAbi(["function execute(bytes commands, bytes[] inputs, uint256 deadline) payable"]);
+export const EXECUTE_ABI = parseAbi(["function execute(bytes commands, bytes[] inputs, uint256 deadline) payable"]);
+const ERC20_ABI = parseAbi([
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function balanceOf(address) view returns (uint256)",
+]);
+const PERMIT2_ABI = parseAbi([
+  "function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)",
+  "function approve(address token, address spender, uint160 amount, uint48 expiration)",
+]);
+const QUOTER_ABI = parseAbi([
+  "function quoteExactInputSingle(((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) poolKey,bool zeroForOne,uint128 exactAmount,bytes hookData) params) returns (uint256 amountOut,uint256 gasEstimate)",
+]);
+
+export function isImd(tokenAddress, chainKey = "ethereum") {
+  return chainKey === "ethereum" && String(tokenAddress).toLowerCase() === IMD.toLowerCase();
+}
+
+async function client(chainKey) {
+  const { httpClient } = await import("./chains.mjs");
+  return httpClient(chainKey);
+}
+
+/** ETH out (wei) for selling `amountIn` IMD through the hooked pool. */
+export async function quoteImdToEth(amountIn, chainKey = "ethereum") {
+  const c = await client(chainKey);
+  const { result } = await c.simulateContract({
+    address: getAddress(V4_QUOTER),
+    abi: QUOTER_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [{
+      poolKey: { currency0: ETH, currency1: getAddress(IMD), fee: HOOKED_POOL.fee, tickSpacing: HOOKED_POOL.tickSpacing, hooks: getAddress(HOOKED_POOL.hooks) },
+      zeroForOne: false, // IMD (currency1) → ETH (currency0)
+      exactAmount: amountIn,
+      hookData: "0x",
+    }],
+  });
+  return result[0];
+}
 
 /**
- * EIP-712 typed data for the per-trade Permit2 permit (the browser signs THIS).
- * Domain + types per IAllowanceTransfer (Permit2 canonical).
+ * Pure calldata builder: execute("0x10", [V4_SWAP]) with actions 0x070b0e =
+ * SWAP_EXACT_IN (0x07), SETTLE (0x0b), TAKE (0x0e) — exactly the reference
+ * tx's shapes: SETTLE(IMD, 0 = full open delta, payerIsUser = true) and
+ * TAKE(ETH, recipient, 0 = full open delta). (SETTLE_ALL/TAKE_ALL are
+ * 0x0c/0x0f; their 2-field params reverted in simulation.) Slippage is
+ * enforced by amountOutMinimum.
  */
-export function permitTypedData({ tokenAddress, sellerAddress, spender = HOOK_PERMIT_SPENDER, expiration, nonce, deadline, chainId = 1 }) {
+export function buildImdEthSwapCall({ amountIn, minOutWei, recipient, deadlineSec }) {
+  const PATH_KEY = "(address intermediateCurrency,uint24 fee,int24 tickSpacing,address hooks,bytes hookData)";
+  const swap = encodeAbiParameters(
+    parseAbiParameters(`(address currencyIn, ${PATH_KEY}[] path, uint256[] maxHopSlippage, uint128 amountIn, uint128 amountOutMinimum)`),
+    [{
+      currencyIn: getAddress(IMD),
+      path: [{ intermediateCurrency: ETH, fee: HOOKED_POOL.fee, tickSpacing: HOOKED_POOL.tickSpacing, hooks: getAddress(HOOKED_POOL.hooks), hookData: "0x" }],
+      maxHopSlippage: [],
+      amountIn,
+      amountOutMinimum: minOutWei,
+    }],
+  );
+  const settle = encodeAbiParameters(parseAbiParameters("address currency, uint256 amount, bool payerIsUser"), [getAddress(IMD), 0n, true]);
+  const take = encodeAbiParameters(parseAbiParameters("address currency, address recipient, uint256 amount"), [ETH, getAddress(recipient), 0n]);
+  const v4Swap = encodeAbiParameters(parseAbiParameters("bytes actions, bytes[] params"), ["0x070b0e", [swap, settle, take]]);
   return {
-    types: {
-      EIP712Domain: [
-        { name: "name", type: "string" },
-        { name: "chainId", type: "uint256" },
-        { name: "verifyingContract", type: "address" },
-      ],
-      PermitDetails: [
-        { name: "token", type: "address" },
-        { name: "amount", type: "uint160" },
-        { name: "expiration", type: "uint48" },
-        { name: "nonce", type: "uint48" },
-      ],
-      PermitSingle: [
-        { name: "details", type: "PermitDetails" },
-        { name: "spender", type: "address" },
-        { name: "sigDeadline", type: "uint256" },
-      ],
-    },
-    primaryType: "PermitSingle",
-    domain: { name: "Permit2", chainId, verifyingContract: getAddress(PERMIT2) },
-    message: {
-      details: {
-        token: getAddress(tokenAddress),
-        amount: (2n ** 160n - 1n).toString(),
-        expiration,
-        nonce,
-      },
-      spender: getAddress(spender),
-      sigDeadline: deadline.toString(),
-    },
+    address: getAddress(HOOK_ROUTER),
+    abi: EXECUTE_ABI,
+    functionName: "execute",
+    args: ["0x10", [v4Swap], BigInt(deadlineSec)],
+    value: 0n,
   };
 }
 
 /**
- * Read the current Permit2 nonce for (owner, token, spender) — required to
- * build the typed data the wallet signs. Free on-chain read.
+ * Sell IMD → ETH. signer = the standard interface ({ address, callContract }).
+ * Sets the one-time allowance chain if missing (each leg waits for its receipt
+ * so the next read sees it), quotes, applies slippage, and swaps.
  */
-export async function getPermit2Nonce({ ownerAddress, tokenAddress, chainKey = "ethereum" }) {
-  const { httpClient } = await import("./chains.mjs");
-  const c = httpClient(chainKey);
-  const result = await c.readContract({
-    address: getAddress(PERMIT2),
-    abi: parseAbi(["function allowance(address,address,address) view returns (uint160 amount, uint48 expiration, uint48 nonce)"]),
-    functionName: "allowance",
-    args: [getAddress(ownerAddress), getAddress(tokenAddress), getAddress(HOOK_PERMIT_SPENDER)],
-  });
-  return BigInt(result[2]);
-}
+export async function executeImdEthSell({ signer, chainKey = "ethereum", amountIn, slippagePct = 3 }) {
+  if (chainKey !== "ethereum") throw new Error("IMD sells are Ethereum-only");
+  if (!(amountIn > 0n)) throw new Error("sell amount must be positive");
+  const c = await client(chainKey);
+  const owner = getAddress(signer.address);
+  const imd = getAddress(IMD);
+  const router = getAddress(HOOK_ROUTER);
+  const permit2 = getAddress(PERMIT2);
 
-/**
- * Build execute("0x0a10", [permit, swap]) with viem-native encoding throughout —
- * every ABI structure is emitted by encodeAbiParameters/encodeFunctionData with
- * typed components; zero hand-padded hex concatenation.
- *
- * @returns {{ to: string, data: string, value: string }}
- */
-export function buildHookedPoolSellCalldata({ tokenAddress, amountHuman, tokenDecimals = 18, sellerAddress, minOutWei, permitSignature, chainKey = "ethereum" }) {
-  const token = getAddress(tokenAddress);
-  const seller = getAddress(sellerAddress);
-  const ETH = getAddress("0x0000000000000000000000000000000000000000");
-  const amountIn = typeof amountHuman === "string"
-    ? parseUnits(amountHuman, tokenDecimals)
-    : BigInt(Math.round(Number(amountHuman) * 10 ** tokenDecimals));
+  const bal = await c.readContract({ address: imd, abi: ERC20_ABI, functionName: "balanceOf", args: [owner] });
+  if (bal < amountIn) throw new Error(`IMD balance ${bal} is below the sell amount ${amountIn}`);
 
-  // ── input[0]: PERMIT2_PERMIT input = abi.encode(PermitSingle, bytes sig)
-  const permitInput = encodeAbiParameters(
-    parseAbiParameters("(address token, uint160 amount, uint48 expiration, uint48 nonce) details, address spender, uint256 sigDeadline, bytes signature"),
-    [{
-      token,
-      amount: 2n ** 160n - 1n,
-      expiration: permitSignature.expiration,
-      nonce: permitSignature.nonce,
-    }, getAddress(HOOK_PERMIT_SPENDER), permitSignature.deadline, permitSignature.sig]
-  );
+  const quotedOut = await quoteImdToEth(amountIn, chainKey);
+  if (!(quotedOut > 0n)) throw new Error("the ETH/IMD pool quoted 0 ETH for this sell — refusing");
+  const bps = BigInt(Math.round((Number.isFinite(Number(slippagePct)) && Number(slippagePct) > 0 ? Number(slippagePct) : 3) * 100));
+  const minOutWei = quotedOut - (quotedOut * bps) / 10000n;
 
-  // ── input[1]: V4_SWAP input = abi.encode(bytes actions, bytes[] params)
-  //    actions 070b0e = SWAP_EXACT_IN, SETTLE_ALL, TAKE_ALL
-  //
-  //    params[0] = SWAP_EXACT_IN = abi.encode(ExactInputParams) where the tuple is the
-  //    PROVEN buildV4ExactInPathPayload layout (buy path, live-verified):
-  //      head (5 words): currencyIn, pathOffset, trailingEmptyOffset, amountIn, minOut
-  //      member words:   1, 0x20, intermediate, fee, tickSpacing, hooks
-  //      path block (8): length(0xa0), elementOffset(0x20), currencyIn, fee, ts, hooks, hookDataOffset(0xa0), hookDataLength(1)
-  //      hookData:       abi.encode(seller)
-  //    For the sell: currencyIn = token, intermediate = ETH, hookDataLen = 1 (UI tail [0xa0][0][1]).
-  const pathHex =
-    token.slice(2).toLowerCase() +
-    ETH.slice(2).toLowerCase() +
-    BigInt(HOOKED_POOL.fee).toString(16).padStart(64, "0") +
-    BigInt(HOOKED_POOL.tickSpacing).toString(16).padStart(64, "0") +
-    getAddress(HOOKED_POOL.hooks).slice(2).toLowerCase().padStart(64, "0");
-  const hookDataHex = seller.slice(2).toLowerCase().padStart(64, "0");
+  const { waitForTxReceipt } = await import("./sniper-extras.mjs");
+  const erc20Allowance = await c.readContract({ address: imd, abi: ERC20_ABI, functionName: "allowance", args: [owner, permit2] });
+  if (erc20Allowance < amountIn) {
+    const tx = await signer.callContract({ address: imd, abi: ERC20_ABI, functionName: "approve", args: [permit2, 2n ** 256n - 1n] });
+    await waitForTxReceipt(chainKey, tx);
+  }
+  const p2 = await c.readContract({ address: permit2, abi: PERMIT2_ABI, functionName: "allowance", args: [owner, imd, router] });
+  const p2amt = BigInt(p2[0] ?? 0n);
+  const p2exp = BigInt(p2[1] ?? 0n);
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  if (p2amt < amountIn || p2exp <= nowSec + 600n) {
+    const tx = await signer.callContract({ address: permit2, abi: PERMIT2_ABI, functionName: "approve", args: [imd, router, MAX_UINT160, MAX_UINT48] });
+    await waitForTxReceipt(chainKey, tx);
+  }
 
-  // ── input[1]: V4_SWAP input = abi.encode(bytes actions, bytes[] params)
-  //    actions 070b0e = SWAP_EXACT_IN, SETTLE_ALL, TAKE_ALL
-  //
-  //    params[0] = SWAP_EXACT_IN — 16 words = 512 bytes (matches the UI's len word 0x200):
-  //      [0x20]            tuple offset
-  //      [currencyIn]      IMD (we sell the token)
-  //      [0xa0]            path offset (HEAD_WORDS=5 × 32)
-  //      [0x1a0]           trailing-empty-field offset (pathOffset + 8×32)
-  //      [amountIn] [minOut]
-  //      [1] [0x20]        published member + its offset (proven buy layout)
-  //      [intermediate]    ETH (proceeds)
-  //      [fee] [ts] [hooks]
-  //      [0xa0] [0] [1]    hookData offset, proven word, hookDataLength=1
-  //      [sqrtPriceLimit]  word 16 — the on-chain reference tx (0x6fbc3188…) carries
-  //                        0x689bab3f3a37da09d5932db10000 here, NOT the seller. The
-  //                        seller appears ONLY in the TAKE recipient. Value decoded
-  //                        from clean on-chain bytes 2026-09-23.
-  //    This is the PROVEN buildV4ExactInPathPayload (buy) shape with sell deltas:
-  //    currencyIn=token, and the trailing word = sqrtPriceLimitX96 (not hookData).
-  const swapParams = "0x" + [
-    wn(0x20),
-    addr(token),
-    wn(0xa0),
-    wn(0x1a0),
-    wn(amountIn),
-    wn(minOutWei),
-    wn(1),
-    wn(0x20),
-    addr(ETH),
-    wn(HOOKED_POOL.fee),
-    wn(HOOKED_POOL.tickSpacing),
-    addr(HOOKED_POOL.hooks),
-    wn(0xa0),
-    wn(0),
-    wn(1),
-    wn(SQRT_PRICE_LIMIT),
-  ].join("");
-
-  const settleParams = encodeAbiParameters(
-    parseAbiParameters("address currency, uint256 amount, bool payerIsUser"),
-    [token, 0n, true]
-  );
-  const takeParams = encodeAbiParameters(
-    parseAbiParameters("address currency, address recipient, uint256 amount"),
-    [ETH, seller, 0n]
-  );
-
-  const v4SwapInput = encodeAbiParameters(
-    parseAbiParameters("bytes actions, bytes[] params"),
-    ["0x070b0e", [swapParams, settleParams, takeParams]]
-  );
-
-  const data = encodeFunctionData({
-    abi: EXECUTE_ABI,
-    functionName: "execute",
-    args: ["0x0a10", [permitInput, v4SwapInput], BigInt(Math.floor(Date.now() / 1000) + 300)],
-  });
-
-  return { to: getAddress(HOOK_ROUTER), data, value: "0" };
+  const call = buildImdEthSwapCall({ amountIn, minOutWei, recipient: owner, deadlineSec: Math.floor(Date.now() / 1000) + 300 });
+  const txHash = await signer.callContract(call);
+  await waitForTxReceipt(chainKey, txHash);
+  return { txHash, quotedOut, minOutWei };
 }

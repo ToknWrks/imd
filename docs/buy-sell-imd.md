@@ -87,117 +87,51 @@ pools where SWAP_EXACT_IN_SINGLE reverts).
 - Curve-coin machinery (`curve-buy.mjs`, `getCurveCoinState`) must never route
   IMD — it isn't a curve token.
 
-## HOW TO SELL (current state)
+## HOW TO SELL — IMD → ETH only (as-built 2026-09-24)
 
-### ✅ Works today: IMD → USDC via V3 (deployed, commit `f78a18b`)
+**One path for every IMD sell** (manual Exit in autonomy and co-pilot, sniper,
+autosell): `executeSniperSell` short-circuits IMD to
+`executeImdEthSell()` in `v4-hook-sell.mjs`. **IMD never sells to USDC** and
+never goes through the Universal Router. The Exit modal has no proceeds
+toggle anymore — IMD exits pay ETH.
 
-`SwapRouter02.exactInputSingle` on the V3 USDC/IMD pool (fee 3000), delivered
-as USDC to the seller. This is what the watcher exit now uses: `buildSellTx`
-delegates to `executeSniperSell` → `resolveSellVenue`, which ranks
-V4 / V3-dollar / V3-WETH candidates by liquidity, **quote-tests V4 candidates
-and demotes ones whose quoter reverts**, and stages approve→swap via the
-capture-signer (one browser signature per stage). Live-verified: 1 IMD → $5.95
-USDC; full-balance `eth_call` simulation passed at the exact on-chain balance.
+- **Target:** hook-router `0x23617e59…De85` — `execute("0x10", [V4_SWAP], deadline)`.
+- **V4_SWAP:** actions `0x070b0e` = SWAP_EXACT_IN, SETTLE, TAKE (the reference
+  tx's exact shapes: `SETTLE(IMD, 0, payerIsUser=true)`, `TAKE(ETH, seller, 0)`).
+- **Swap tuple:** the STANDARD v4-periphery `ExactInputParams`
+  `{currencyIn, PathKey[] path, uint256[] maxHopSlippage, amountIn, amountOutMinimum}`,
+  encoded with viem. viem reproduces the reference tx bytes exactly. The old
+  "word 16 mystery / sqrtPriceLimit / trailing empty field" were misreadings
+  of `maxHopSlippage` — we send `[]` and enforce slippage via
+  `amountOutMinimum` (quoted from the V4 quoter on the hooked pool, minus
+  the user's slippage).
+- **No per-trade permit.** A standing allowance is enough. One-time chain,
+  set automatically if missing, each leg mined before the next:
+  `IMD.approve(Permit2, max)` → `Permit2.approve(IMD, hookRouter, max, max-uint48)`.
+  Autonomy: the SCW's session key signs these itself (no prompt). Co-pilot:
+  staged direct-sign steps (approve → approve → swap).
+- **Pool:** hooked ETH/IMD, poolId `0x415829f7…a704`, fee 10000,
+  tickSpacing 60, hooks `0xc6C965Bd…2840` (the pool the Uniswap UI trades).
+- **Verified:** `imd-sell.test.mjs` pins the encoder to tx `0x6fbc3188…`;
+  full-balance `eth_simulateV1` from SCW `0x3C73…4021` (7.29 IMD):
+  Permit2 approve ✅ 47,818 gas → swap ✅ ~360k gas; minOut above quote
+  reverts (slippage guard live). The UR with the same calldata reverts.
 
-The standing caveat: IMD is a plain ERC-20, so **`Sell 100%` amounts must be
-full-precision decimal STRINGS** (BigInt scale / `formatUnits`), never floats
-(see CLAUDE.md float round-trip lesson — three independent live hits).
+### Do NOT re-learn
 
-### ❌ What does NOT work (do not re-learn these)
-
-1. **V4 sell through the Universal Router with a plain ERC-20 allowance
-   reverts.** The ETH/IMD hooked pool's hook does not accept it. Even
-   byte-perfect replays of swap-only calldata revert — the pool requires the
-   per-trade Permit2 permit leg to run first in the same `execute`.
-2. **`findBestV3DollarPool` liquidity saturation**: it reports ~$2B for the
-   $33k USDC pool, which beats the V4 pool's real $1.76M in the venue ranking.
-   Same bug affects dip-watcher venue selection. **Not yet fixed.**
-3. **Replaying the UI's calldata against the UR fails** — because the UI does
-   not use the UR for this pool (see below).
-
-### 🎯 The proven IMD → ETH sell (on-chain ground truth, 2026-09-23)
-
-Tx `0x6fbc31886fa6ccb50359c1b2f2822701823325bd3205d52127b0905e1535630d`
-(block 26036791) — sold 1 IMD → ~0.00212 ETH, **from the user's EOA, succeeded**.
-
-| Field | Value |
-|---|---|
-| **`to`** | `0x23617E59A5925B2A4BF75D73FF6711CD0B29DE85` — the **hook-router**, NOT the Universal Router |
-| selector | `0x3593564c` = `execute(bytes commands, bytes[] inputs, uint256 deadline)` |
-| commands | `0x0a10` (PERMIT2_PERMIT + V4_SWAP) |
-| deadline | `0x6ab32cc4` |
-
-**input[0] — PERMIT2_PERMIT** (per-trade permit; a plain ERC-20 allowance does
-NOT satisfy this pool):
-
-```
-PermitSingle {
-  details: { token: IMD, amount: MAX_UINT160, expiration: <far-future uint48>, nonce },
-  spender: 0x23617E59A5925B2A4BF75D73FF6711CD0B29DE85,   # the hook-router, not the UR
-  sigDeadline
-} ++ 65-byte EIP-712 signature
-```
-EIP-712 domain: `{ name: "Permit2", chainId: 1, verifyingContract: Permit2 }` —
-implemented as `permitTypedData()` in `v4-hook-sell.mjs`.
-
-**input[1] — V4_SWAP** (`abi.encode(bytes actions, bytes[] params)`),
-actions `0x070b0e` = SWAP_EXACT_IN, SETTLE_ALL, TAKE_ALL:
-
-```
-params[0] (swap) — 16 words / 512 bytes:
-  [0x20]        tuple offset
-  [IMD]         currencyIn (we sell the token)
-  [0xa0]        path offset (HEAD_WORDS = 5 × 32)
-  [0x1a0]       trailing-empty-field offset (pathOffset + 8 × 32)
-  [amountIn] [minOut]
-  [1] [0x20]    published member + its offset (same as the proven buy encoder)
-  [ETH]         PathKey.intermediate = ETH (proceeds)
-  [10000]       fee
-  [60]          tickSpacing
-  [0xC6C965BD…] hooks
-  [0xa0]        hookData offset
-  [0]           proven layout word
-  [1]           hookDataLength = 1 word
-  [0x689bab3f3a37da09d5932db10000]   ← word 16: NOT the seller (see below)
-
-params[1] SETTLE_ALL: (currency=IMD, amount=0, payerIsUser=true)
-params[2] TAKE_ALL:   (currency=ETH, recipient=SELLER, amount=0)
-```
-
-**Word 16 of the swap tuple is a mystery value, now resolved:** the earlier
-session believed the pasted UI calldata was nibble-corrupted at that word and
-that it held the seller address. The on-chain bytes (fetched clean via
-`eth_getTransactionByHash`) prove the value really is
-`0x…689bab3f3a37da09d5932db10000` — almost certainly a
-**sqrtPriceLimitX96** for the swap (same scale as a price limit; the UI sets
-one). The seller address appears **only** in the TAKE params as the recipient.
-
-**Trailing bytes:** the tx calldata continues past the deadline with
-`756e6978…` ("unix" + hex) — either a 4th argument of this contract's
-`execute` or router-specific trailing data. Not yet decoded. If a dry-run
-against `0x23617e59…` reverts, check this first.
-
-### State of `v4-hook-sell.mjs` (uncommitted working tree)
-
-Rebuilt 2026-09-23 with viem-native encoding; structural harness
-(`scripts/verify-v4-hook-sell.mjs`) passes 33/33 words against the on-chain
-bytes **except** the two known-wrong fields. Remaining fixes before it can
-ship:
-
-1. **Target `0x23617e59…`, not the UR** — `buildHookedPoolSellCalldata`
-   currently returns the UR address.
-2. **Word 16 = the price-limit value the UI used** (or `0` — test whether this
-   contract accepts 0), not the seller address.
-3. **Resolve the trailing calldata bytes** after the deadline.
-4. Then: dry-run `eth_estimateGas` against `0x23617e59…` (should simulate clean
-   — every earlier "unknown reason" revert was against the wrong router), one
-   small live sell (~$1), then arm.
+1. The Universal Router reverts for this pool — the hook-router is the executor.
+2. SETTLE_ALL/TAKE_ALL (0x0c/0x0f) with 2-field params reverted in simulation;
+   use SETTLE/TAKE (0x0b/0x0e) as the reference tx does.
+3. `findBestV3DollarPool` still reports ~$2B for the $33k USDC pool — irrelevant
+   to IMD sells now (short-circuited), but it still skews dip-watcher's venue
+   choice for IMD. **Not yet fixed.**
+4. Constants must be EIP-55 checksummed or all-lowercase — an ALL-CAPS hex
+   address (`0x23617E59…`) fails viem's checksum validation.
 
 ## Verification ladder (every new execution path)
 
-1. **Structural**: `node scripts/verify-v4-hook-sell.mjs` — viem-decode our
-   calldata and diff every word against the on-chain ground truth
-   (`/tmp/v4-sell-tx.json`; re-fetch with `scripts/fetch-ui-sell-tx.mjs`).
+1. **Structural**: `node --test imd-sell.test.mjs` — encoder pinned to the
+   on-chain reference tx (re-fetch the raw tx with `scripts/fetch-ui-sell-tx.mjs`).
 2. **Dry-run**: `eth_estimateGas` / `eth_call` of the exact calldata as the
    seller. Against `0x23617e59…`, not the UR.
 3. **Small live sell** (~$1 of IMD), verify delivered ETH via
@@ -217,8 +151,8 @@ alongside the sell work.
 | File | Role |
 |---|---|
 | `dip-swap.mjs` | Proven buy encoders: `buildV4ExactInPathPayload`, `sendV4Buy`, `buyDipWithDollar` (Permit2 two-layer pre-flight) |
-| `v4-hook-sell.mjs` | IMD→ETH hooked-pool sell builder (needs the 3 fixes above) |
-| `scripts/verify-v4-hook-sell.mjs` | Structural diff harness vs on-chain ground truth |
+| `v4-hook-sell.mjs` | THE IMD sell: `executeImdEthSell`, `buildImdEthSwapCall`, `quoteImdToEth` |
+| `imd-sell.test.mjs` | Encoder pinned to the on-chain reference tx |
 | `scripts/fetch-ui-sell-tx.mjs` | Re-fetch the reference sell tx calldata |
-| `sniper-extras.mjs` | `resolveSellVenue` / `executeSniperSell` / `executeV3DollarSell` (the working USDC path) |
+| `sniper-extras.mjs` | `executeSniperSell` (IMD short-circuits to `executeImdEthSell`; other tokens use `resolveSellVenue`) |
 | `direct-sell.mjs` | Capture-signer builders (watcher exit + sniper sell share one dispatcher) |

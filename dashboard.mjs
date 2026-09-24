@@ -513,13 +513,6 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
           <label>Slippage tolerance (%)</label>
           <input id="exitSlippage" type="number" min="0.1" step="0.1" value="3">
         </div>
-        <div class="field">
-          <label>Proceeds</label>
-          <select id="exitProceeds">
-            <option value="usdc" selected>USDC (stable)</option>
-            <option value="eth">ETH (beta — IMD only, signs a free permit first)</option>
-          </select>
-        </div>
         <p class="hint" id="exitStatus"></p>
         <button type="submit" class="danger" id="exitConfirmBtn">Confirm exit — sell</button>
         <button class="secondary" type="button" onclick="document.getElementById('exitModal').close()">Cancel</button>
@@ -629,11 +622,8 @@ async function watchersPage(error = "", planWatcherId = null, userId = null) {
         btn.disabled = true;
         status.textContent = 'selling…';
         try {
-          const proceeds = document.getElementById('exitProceeds').value;
           const body = { amount, slippagePct: slippage, sellAll: exitCtx.sellAll === 'true' };
-          const route = proceeds === 'eth'
-            ? '/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit-v4'
-            : '/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit';
+          const route = '/api/watchers/' + encodeURIComponent(exitCtx.id ?? exitCtx.watcherId ?? '') + '/exit';
           const j = await window.directSignTrade(route, body, function(m) { status.textContent = m; });
           if (j.directSigned) {
             status.textContent = 'sent — tx ' + (j.txHash || '').slice(0, 14) + '… (check Etherscan for the receipt)';
@@ -2111,120 +2101,6 @@ async function buildSellTx(watcher, amountHuman, slippagePct, uid) {
     sellerAddress: uid,
   });
   return { directSign: { to: built.to, data: built.data, value: built.value, chainId, isApproval: built.isApproval } };
-}
-
-if (url.startsWith("/api/watchers/") && url.endsWith("/exit-v4") && method === "POST") {
-      // IMD → ETH hooked-pool sell (beta, 2026-09-23). Staged direct-sign:
-      //   call 1 (no permitSig): returns the EIP-712 typed data for the per-trade
-      //    Permit2 permit — the browser signs it FREE (no tx, no gas).
-      //   call 2 (body carries permitSig): builds the final execute() calldata
-      //    embedding that signature, returns the directSign tx for the wallet.
-      // Ground truth: tx 0x6fbc3188… (block 26036791) — the exact byte pattern
-      // that succeeded on-chain. NOT for unattended use: the user clicks this.
-      const id = decodeURIComponent(url.split("/")[3]);
-      const watcher = getDipWatcher(id);
-      if (!watcher) return json({ ok: false, error: "token not found" });
-      try {
-        const uid = sessionAddress(req);
-        const body = JSON.parse(await readBody());
-        const { IMD } = await import("./v4-hook-sell.mjs");
-        const token = watcher.contract_address?.toLowerCase();
-        const chainKey = watcher.chain || "ethereum";
-        if (chainKey !== "ethereum" || token !== IMD.toLowerCase()) {
-          return json({ ok: false, error: "the ETH (beta) sell path is IMD-only for now" });
-        }
-        const { amount, slippagePct, sellAll } = body;
-        let sellAmountHuman;
-        if (sellAll) {
-          const { getTokenBalance } = await import("./sniper-extras.mjs");
-          const bal = await getTokenBalance(chainKey, token, uid);
-          if (!(BigInt(bal.raw) > 0n)) return json({ ok: false, error: "token balance is 0" });
-          sellAmountHuman = formatUnits(BigInt(bal.raw), bal.decimals);
-        } else {
-          const amt = Number(amount);
-          if (!(amt > 0)) return json({ ok: false, error: "amount must be a positive number" });
-          sellAmountHuman = amt;
-        }
-        const { parseUnits, formatUnits } = await import("viem");
-        const slippage = Number(slippagePct ?? watcher.slippage_pct ?? 3);
-        const { getTokenMeta } = await import("./sniper-extras.mjs");
-        const meta = await getTokenMeta(token, chainKey);
-
-        // Stage 1: hand the wallet the typed data (permit), free signature.
-        if (!body.permitSignature) {
-          const { permitTypedData, getPermit2Nonce, SQRT_PRICE_LIMIT } = await import("./v4-hook-sell.mjs");
-          const nonce = await getPermit2Nonce({ ownerAddress: uid, tokenAddress: token, chainKey });
-          const deadline = Math.floor(Date.now() / 1000) + 300;
-          // Quote for the human-readable estimate: reuse the V4 quoter via dip-swap
-          let quotedEth = null;
-          try {
-            const { quoteSellV4, findBestV4Pool } = await import("./dip-swap.mjs");
-            const pool = { poolKey: { currency0: "0x0000000000000000000000000000000000000000", currency1: token, fee: 10000, tickSpacing: 60, hooks: "0xC6C965BD164C483E87D0B550671798E9A3602840" } };
-            const amountInWei = typeof sellAmountHuman === "string" ? parseUnits(String(sellAmountHuman), Number(meta.decimals)) : 0n;
-            if (amountInWei > 0n) quotedEth = await quoteSellV4(pool, amountInWei, chainKey);
-          } catch { /* estimate is best-effort */ }
-          return json({
-            ok: true,
-            stage: "permit",
-            permitTypedData: permitTypedData({
-              tokenAddress: token,
-              sellerAddress: uid,
-              expiration: 1799999999, // far-future uint48, matches the reference tx convention
-              nonce: Number(nonce),
-              deadline,
-              chainId: 1,
-            }),
-            sqrtPriceLimit: "0x" + SQRT_PRICE_LIMIT.toString(16),
-            quotedEth: quotedEth != null ? quotedEth.toString() : null,
-            meta: { symbol: watcher.symbol ?? "IMD", decimals: Number(meta.decimals) },
-          });
-        }
-
-        // Stage 2: build the final calldata with the real signature.
-        const { buildHookedPoolSellCalldata } = await import("./v4-hook-sell.mjs");
-        const amountInWei = typeof sellAmountHuman === "string"
-          ? parseUnits(String(sellAmountHuman), Number(meta.decimals))
-          : BigInt(Math.round(Number(sellAmountHuman) * 10 ** Number(meta.decimals)));
-        // minOut: quote the sell, apply the user's slippage. The sqrtPriceLimit
-        // word stays at the reference value (it bounded the UI's working sell).
-        let minOutWei = 1n;
-        try {
-          const { quoteSellV4 } = await import("./dip-swap.mjs");
-          const pool = { poolKey: { currency0: "0x0000000000000000000000000000000000000000", currency1: token, fee: 10000, tickSpacing: 60, hooks: "0xC6C965BD164C483E87D0B550671798E9A3602840" } };
-          const quoted = await quoteSellV4(pool, amountInWei, chainKey);
-          const bps = BigInt(Math.round((Number.isFinite(slippage) && slippage > 0 ? slippage : 3) * 100));
-          minOutWei = quoted - (quoted * bps) / 10000n;
-        } catch { /* fall back to minOut=1 wei — the tx still reverts on real slippage via the pool */ }
-        const ps = body.permitSignature;
-        const built = buildHookedPoolSellCalldata({
-          tokenAddress: token,
-          amountHuman: String(sellAmountHuman),
-          tokenDecimals: Number(meta.decimals),
-          sellerAddress: uid,
-          minOutWei,
-          permitSignature: {
-            deadline: BigInt(ps.deadline),
-            expiration: ps.expiration,
-            nonce: ps.nonce,
-            sig: ps.sig,
-          },
-          chainKey,
-        });
-        return json({
-          ok: true,
-          stage: "execute",
-          directSign: { to: built.to, data: built.data, value: built.value, chainId: 1 },
-          recordKind: "exit",
-          recordRef: id,
-          chain: chainKey,
-          asset: "token",
-          amount: -Number(sellAmountHuman),
-          symbol: watcher.symbol ?? null,
-        });
-      } catch (err) {
-        console.error("[exit-v4]", err);
-        return json({ ok: false, error: err.message ?? "exit-v4 failed" });
-      }
 }
 
 if (url.startsWith("/api/watchers/") && url.endsWith("/exit") && method === "POST") {

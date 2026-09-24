@@ -569,6 +569,20 @@ export async function executeSniperSell({ signer, chainKey, tokenAddress, amount
   if (amountIn <= 0n) throw new Error("sell amount must be positive");
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
 
+  // IMD ALWAYS sells to ETH through the hooked ETH/IMD V4 pool via the
+  // launchpad hook-router (v4-hook-sell.mjs). Never USDC, never the Universal
+  // Router, regardless of any saved pool / venue ranking (2026-09-24).
+  {
+    const { isImd, executeImdEthSell } = await import("./v4-hook-sell.mjs");
+    if (isImd(token, chainKey)) {
+      const res = await executeImdEthSell({ signer, chainKey, amountIn, slippagePct });
+      return {
+        txHash: res.txHash, label: "Uniswap V4 ETH/IMD (hooked) via hook-router", dex: "V4_IMD_HOOK",
+        amountIn: amountIn.toString(), quotedOut: res.quotedOut.toString(), ethReceived: Number(res.quotedOut) / 1e18,
+      };
+    }
+  }
+
   // IMD-launchpad curve coins: no AMM venue to resolve — the hook consumes the
   // swap whole. Sell through the curve (zeroForOne=false, ETH min-out guard).
   // Trigger: explicit CURVE pool marker, or any ethereum-chain sell with no
