@@ -99,6 +99,10 @@ const AERO_V2_SWAP_ABI = parseAbi([
 const RECONCILE_MS = 30_000;
 const POSITION_REFRESH_MS = 15 * 60_000; // wallet-position scans are the heaviest HTTP consumers (transfer history) — 15min after the 2026-09-11 Alchemy rate-limit (was 5min)
 
+// IMD watch venue (see subscribe()): the unhooked ETH/IMD V4 pool, fee 10000 / ts 200.
+const IMD_TOKEN = "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7";
+const IMD_WATCH_POOL_ID = "0xb07d640fd9e2eb9dc81b953c8e4fd006bdfeaf276010fb5418eb763ca15abfb3";
+
 // watcherId → { unwatch, poolAddress }
 const active = new Map();
 
@@ -111,6 +115,16 @@ async function subscribe(watcher) {
   let override = null;
   if (watcher.pool_address) {
     override = await resolvePoolOverride(watcher.contract_address, watcher.pool_address, chainKey);
+  } else if (chainKey === "ethereum" && watcher.contract_address?.toLowerCase() === IMD_TOKEN) {
+    // IMD: always watch the ETH/IMD V4 pool where its volume actually trades
+    // (2026-09-24 measurement over ~24h: b07d 505 swaps / 72k IMD sold, biggest
+    // single sell 6.3k IMD; hooked pool 147 swaps / 3.8k IMD; USDC V3 ~$34k TVL).
+    // Pinned on-chain (no Dexscreener dependency) so a rate-limited venue lookup
+    // can never fall back to the USDC pool again.
+    override = await resolvePoolOverride(watcher.contract_address, IMD_WATCH_POOL_ID, chainKey).catch((e) => {
+      console.error(`[dip-watcher] IMD pool pin failed (${e.message}) — falling back to auto-discovery`);
+      return null;
+    });
   }
   const v4Pool = override ?? await findBestV4Pool(watcher.contract_address, chainKey).catch(() => null);
   // Curve coins have no V3 pool at all — findBestPool throws; catch so the

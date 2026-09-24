@@ -122,9 +122,9 @@ toggle anymore — IMD exits pay ETH.
 1. The Universal Router reverts for this pool — the hook-router is the executor.
 2. SETTLE_ALL/TAKE_ALL (0x0c/0x0f) with 2-field params reverted in simulation;
    use SETTLE/TAKE (0x0b/0x0e) as the reference tx does.
-3. `findBestV3DollarPool` still reports ~$2B for the $33k USDC pool — irrelevant
-   to IMD sells now (short-circuited), but it still skews dip-watcher's venue
-   choice for IMD. **Not yet fixed.**
+3. `findBestV3DollarPool` liquidity now comes from the pool's real token
+   balances (was an L·√P estimate that saturated at "$2B" for the ~$34k USDC
+   pool and outranked the $1.8M V4 pool everywhere). **Fixed 2026-09-24.**
 4. Constants must be EIP-55 checksummed or all-lowercase — an ALL-CAPS hex
    address (`0x23617E59…`) fails viem's checksum validation.
 
@@ -138,13 +138,17 @@ toggle anymore — IMD exits pay ETH.
    `getTxDeliveredEth` (balance-delta, not `msg.value`).
 4. **Arm.**
 
-## Signed-amount decode reminder (dip detection)
+## Dip detection venue (as-built 2026-09-24)
 
-Swap event amounts are SIGNED ints — decode two's complement. Token side
-negative ⇒ external BUY; positive ⇒ external SELL. The watcher's venue choice
-for IMD must point at the pool IMD actually trades (the hooked pool sees the UI
-flow); the `findBestV3DollarPool` saturation bug currently distorts this — fix
-alongside the sell work.
+The dip-watcher pins IMD to the **unhooked ETH/IMD V4 pool `b07d…`** (fee
+10000 / ts 200), resolved on-chain — no Dexscreener dependency, and a saved
+`pool_address` still overrides it. Measured over ~24h: `b07d` 505 swaps /
+72k IMD sold (biggest single sell 6.3k IMD); hooked `4158` 147 swaps / 3.8k
+IMD; USDC V3 ≈ $34k TVL. Note the split: **sells execute** through the hooked
+pool (hook-router), but **dip signals** come from `b07d`, where the volume is.
+
+V4 Swap amounts are signed from the pool's perspective: token delta < 0 and
+ETH delta > 0 ⇒ an external SELL of IMD (see `handleV4Swap`).
 
 ## Related code
 

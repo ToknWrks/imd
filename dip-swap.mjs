@@ -1413,18 +1413,22 @@ export async function findBestV3DollarPool(tokenAddress, chainKey = "ethereum") 
     if (liq === 0n) return null; // out-of-range — no live liquidity to watch
     const sqrtPriceX96 = s0raw ? BigInt("0x" + s0raw.slice(2, 66)) : 0n;
     const tokenIs0 = t0.toLowerCase() === token.toLowerCase();
-    // Rough in-range USD liquidity for RANKING ONLY. Working in logs avoids
-    // the float overflow of naive L·√P on wide-range pools (VULT: L≈1.1e18 at
-    // tick 306100 overflowed Number to 1e41). Single-sided token amounts are
-    // ≈ L/√P and L·√P depending on side; take logs to keep magnitudes sane.
-    const sqrtP = Number(sqrtPriceX96) / 2 ** 96;
-    const logL = Math.log(Number(liq) || 1);
-    const logP = Math.log(sqrtP || 1e-12);
-    // token0 amount ≈ L/√P, token1 amount ≈ L·√P — take the token's side.
-    const logTokenUnits = tokenIs0 ? logL - logP : logL + logP;
-    const usdPerToken = Math.min(Math.max(getTokenUsdPriceFromPool(sqrtPriceX96, tokenIs0, dep.dollarDecimals), 1e-18), 1e12);
-    const logTokenUsd = logTokenUnits + Math.log(usdPerToken || 1e-18);
-    const liquidityUsd = 2 * Math.min(Math.exp(logTokenUsd), 1e9); // cap at $1B for ranking
+    // USD liquidity from the pool's ACTUAL token balances (2026-09-24). The old
+    // L·√P estimate assumed full-range liquidity and saturated at its $1B cap
+    // (×2 = "$2,000,000,000") for IMD's ~$37k USDC pool — which then outranked
+    // the real $1.8M V4 pool in every venue ranking (dip-watcher watched the
+    // wrong pool). Balances are exact and bounded: dollar side at face value,
+    // token side at the pool's own spot price.
+    const ERC20_BAL = parseAbi(["function balanceOf(address) view returns (uint256)", "function decimals() view returns (uint8)"]);
+    const [dollarRaw, tokenRaw, tokenDec] = await Promise.all([
+      c.readContract({ address: dep.dollar, abi: ERC20_BAL, functionName: "balanceOf", args: [pool] }).catch(() => 0n),
+      c.readContract({ address: token, abi: ERC20_BAL, functionName: "balanceOf", args: [pool] }).catch(() => 0n),
+      c.readContract({ address: token, abi: ERC20_BAL, functionName: "decimals" }).catch(() => 18),
+    ]);
+    const usdPerToken = getTokenUsdPriceFromPool(sqrtPriceX96, tokenIs0, dep.dollarDecimals, Number(tokenDec));
+    const dollarUsd = Number(dollarRaw) / 10 ** dep.dollarDecimals;
+    const tokenUsd = (Number(tokenRaw) / 10 ** Number(tokenDec)) * (Number.isFinite(usdPerToken) ? usdPerToken : 0);
+    const liquidityUsd = dollarUsd + tokenUsd;
     return { kind: "v3", address: pool, token0: t0, token1: t1, fee, liquidityUsd };
   }));
   const valid = candidates.filter((p) => p && p.liquidityUsd > 0);
