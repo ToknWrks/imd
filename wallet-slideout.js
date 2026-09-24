@@ -155,6 +155,10 @@ function renderSmartWalletSection(){
   // ── v2 wallet (user-EOA-owned, plan 2026-09-20): the "no session key" branch
   // now shows the user's OWN counterfactual SCW (owner = their EOA) with a
   // one-click browser-signed Activate. No key to generate, nothing to back up.
+  // Shared formatters (were defined further down in the removed v1 branch and
+  // only reached the v2 branch via function-scope hoisting — keep them here).
+  function bal(v,sym){return v==null?'\u2014':_wf(v)+(sym?' '+sym:'');}
+  function usd(v){return v==null?'':'<span class="usd">$'+_wfu(v)+'</span>';}
   if(s.schema===2){
     var ethUsd2=s.ethUsd||0;
     var imdPerEth2=s.imdPerEth||0;
@@ -306,7 +310,7 @@ async function swMove(direction,asset){
         // IMD funds the IMD token; anything else falls back to the dollar token.
         var tokenAddr=asset==='imd'?(_swState.imdToken||null):(_swState.dollarToken||null);
         var tokenDec=asset==='imd'?18:(_swState.scw&&_swState.scw.dollarDecimals!=null?_swState.scw.dollarDecimals:6);
-        if(!tokenAddr){_swStatus('no '+_we(asset==='imd'?imdSym:dsym)+' token configured on this chain',false,true);return;}
+        if(!tokenAddr){_swStatus('no '+_we(asset==='imd'?(_swState.imdSymbol||'IMD'):(_swState.dollarSymbol||'USDC'))+' token configured on this chain',false,true);return;}
         txParams=fundingTxParams({from:from,scwAddress:scwAddr,asset:'erc20',amount:amount,chain:_swState.chain,tokenAddress:tokenAddr,tokenDecimals:tokenDec});
       }
       _swStatus('signing in your wallet\u2026',true);
