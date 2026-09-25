@@ -278,25 +278,41 @@ export async function getSniperPosition(chainKey, tokenAddress, { walletOverride
   const bal = { ...balLists[0], raw: summedRaw.toString(), formatted: Number(summedRaw) / 10 ** Number(balLists[0].decimals) };
   const ethUsd = await getEthUsd(chainKey);
   let valueUsd = 0;
+  // Curve valuation (IMD launchpad coins): coin → IMD (indexer reserves) →
+  // ETH (imdPerEth) → USD. Used directly when no AMM pool exists, and as the
+  // fallback when the AMM probe quote collapses (see the guard below).
+  const curveValueUsd = async () => {
+    const { getCurveCoinState, getImdPerEth } = await import("./dip-swap.mjs");
+    const curveState = await getCurveCoinState(tokenAddress, chainKey).catch(() => null);
+    const imdPerEth = curveState ? await getImdPerEth(chainKey).catch(() => null) : null;
+    if (!curveState || !(imdPerEth > 0)) return 0;
+    // curve price in IMD per coin = virtualImd / virtualCoin; IMD price = ethUsd / imdPerEth
+    const priceImd = Number(curveState.virtualImd) / Number(curveState.virtualCoin);
+    const priceUsd = (priceImd / imdPerEth) * ethUsd;
+    return priceUsd > 0 ? bal.formatted * priceUsd : 0;
+  };
   if (bal.formatted > 0) {
     const disc = await discoverPools(chainKey, tokenAddress, "0.01");
     const best = disc.pools[0];
-    if (best) {
+    // Probe-collapse guard (2026-09-25): a hooked pool whose hook/fee consumes
+    // the 0.01-ETH probe quotes ~1e-10 tokens out, implying an absurd
+    // per-token price — found live on FWAI/ICE/PEPESWARM/$BLD, where
+    // discoverPools ranked a 32%-fee V4 pool quoting ~1.5e-10 tokens, so a
+    // 238k balance "valued" at $4.2e16 (the P/L card's ≈$42 quadrillion).
+    // No real token trades anywhere near 1000 ETH/unit (the priciest legit
+    // tokens are <100 ETH), so above that distrust the probe and fall back to
+    // the curve these launchpad coins actually trade on. No curve either →
+    // valueUsd stays 0: the P/L card renders "quote unavailable" (honest),
+    // never a fabricated quadrillion.
+    const PROBE_MAX_ETH_PER_TOKEN = 1000;
+    const tokensForPoint01 = best ? Number(best.quotedOut) / 10 ** Number(bal.decimals) : 0;
+    const impliedEthPerToken = tokensForPoint01 > 0 ? 0.01 / tokensForPoint01 : Infinity;
+    if (best && tokensForPoint01 > 0 && impliedEthPerToken <= PROBE_MAX_ETH_PER_TOKEN) {
       // AMM venue: value via the 0.01-ETH probe quote.
-      const tokensForPoint01 = Number(best.quotedOut) / 10 ** Number(bal.decimals);
-      if (tokensForPoint01 > 0) valueUsd = (bal.formatted / tokensForPoint01) * 0.01 * ethUsd;
+      valueUsd = (bal.formatted / tokensForPoint01) * 0.01 * ethUsd;
     } else {
-      // CURVE COIN (IMD launchpad): no AMM pools to probe. Value via curve math:
-      // coin → IMD (indexer reserves) → ETH (imdPerEth) → USD (ethUsd).
-      const { getCurveCoinState, getImdPerEth } = await import("./dip-swap.mjs");
-      const curveState = await getCurveCoinState(tokenAddress, chainKey).catch(() => null);
-      const imdPerEth = curveState ? await getImdPerEth(chainKey).catch(() => null) : null;
-      if (curveState && imdPerEth > 0) {
-        // curve price in IMD per coin = virtualImd / virtualCoin; IMD price = ethUsd / imdPerEth
-        const priceImd = Number(curveState.virtualImd) / Number(curveState.virtualCoin);
-        const priceUsd = (priceImd / imdPerEth) * ethUsd;
-        if (priceUsd > 0) valueUsd = bal.formatted * priceUsd;
-      }
+      // No AMM venue, or the probe quote collapsed (hook-consumed swap).
+      valueUsd = await curveValueUsd();
     }
   }
   return { ...bal, valueUsd, ethUsd };
