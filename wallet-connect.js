@@ -25,7 +25,12 @@ var _wcAddress = null;
 function _wcBtnLabel() {
   var b = document.getElementById('walletConnectBtn');
   if (!b) return;
-  b.textContent = _wcAddress ? _wcAddress.slice(0, 6) + '\\u2026' + _wcAddress.slice(-4) : 'Connect wallet';
+  // On narrow screens shorten the label so it can't crowd the icon nav
+  // (the CSS also ellipsizes as a fallback). Desktop keeps the full text.
+  var short = window.matchMedia && window.matchMedia('(max-width: 760px)').matches;
+  b.textContent = _wcAddress
+    ? _wcAddress.slice(0, 6) + '\\u2026' + _wcAddress.slice(-4)
+    : (short ? 'Connect' : 'Connect wallet');
   b.classList.toggle('connected', Boolean(_wcAddress));
   b.title = _wcAddress ? 'Signed in — click to sign out' : 'Connect your wallet and sign in';
 }
@@ -103,6 +108,10 @@ async function wcDisconnect() {
     var j = await r.json();
     if (j.ok && j.address) { _wcAddress = j.address; _wcBtnLabel(); }
   } catch {}
+  // Re-evaluate the short/long label when the viewport crosses the breakpoint
+  if (window.matchMedia) {
+    try { window.matchMedia('(max-width: 760px)').addEventListener('change', _wcBtnLabel); } catch {}
+  }
   if (window.ethereum && _wcAddress) {
     // If the wallet disconnects/switches accounts client-side, end the
     // session too rather than silently keep showing stale balances.

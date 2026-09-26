@@ -100,8 +100,22 @@ header { display:flex; align-items:center; justify-content:space-between; paddin
 }
 .logo::before { content:""; display:inline-block; width:8px; height:8px; background:#e8b661; margin-right:0.35rem; }
 .nav-links { display:flex; gap:1.4rem; align-items:center; }
-.nav-link { color:rgba(255,255,255,0.55); text-decoration:none; font-size:0.82rem; letter-spacing:0.02em; padding:0.25rem 0; border-bottom:2px solid transparent; }
+.nav-link { color:rgba(255,255,255,0.55); text-decoration:none; font-size:0.82rem; letter-spacing:0.02em; padding:0.25rem 0; border-bottom:2px solid transparent; display:flex; align-items:center; gap:0.3rem; }
+.nav-link .nav-ico { display:none; line-height:0; }
+.nav-link .nav-ico svg { display:block; }
 .nav-link.active, .nav-link:hover { color:#e8b661; border-bottom-color:#e8b661; }
+@media (max-width:760px) {
+  header { position:sticky; top:0; z-index:60; padding:0.55rem 0.7rem; gap:0.5rem; background:rgba(12,14,17,0.92); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }
+  .logo { font-size:0.72rem; white-space:nowrap; }
+  .logo::before { width:6px; height:6px; margin-right:0.25rem; }
+  .nav-links { gap:0.15rem; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; flex:1; min-width:0; justify-content:flex-end; }
+  .nav-links::-webkit-scrollbar { display:none; }
+  .nav-link { flex-direction:column; gap:0.15rem; padding:0.35rem 0.45rem; border-bottom:none; border-radius:6px; font-size:0.6rem; letter-spacing:0.03em; flex-shrink:0; }
+  .nav-link .nav-ico { display:block; }
+  .nav-link .nav-txt { display:none; }
+  .nav-link.active, .nav-link:hover { background:rgba(232,182,97,0.12); border-bottom-color:transparent; }
+  .wallet-connect-btn { max-width:86px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.68rem; padding:0.3rem 0.5rem; }
+}
 main { max-width:1024px; margin:0 auto; padding:2rem 1.5rem 3rem; }
 .card { background:#101318; border:1px solid rgba(255,255,255,0.09); border-radius:4px; padding:1.25rem; margin-bottom:1.25rem; }
 h1 { font-size:1.25rem; font-weight:600; letter-spacing:-0.01em; margin:0 0 1rem; }
@@ -167,17 +181,17 @@ function shell(title, body, active = "") {
   <header>
     <div class="logo">Accumulate<span class="logo-imd">IMD</span></div>
     <div class="nav-links">
-      <a class="nav-link ${active === "overview" ? "active" : ""}" href="/overview">Overview</a>
-      <a class="nav-link ${active === "tokens" ? "active" : ""}" href="/tokens">Tokens</a>
-      <a class="nav-link ${active === "alpha" ? "active" : ""}" href="/alpha">Alpha</a>
-      <a class="nav-link ${active === "sniper" ? "active" : ""}" href="/sniper">Sniper</a>
+      <a class="nav-link ${active === "overview" ? "active" : ""}" href="/overview" title="Overview"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg></span><span class="nav-txt">Overview</span></a>
+      <a class="nav-link ${active === "tokens" ? "active" : ""}" href="/tokens" title="Tokens"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 8.5c0-1.4 1.3-2.5 3-2.5s3 1.1 3 2.5-1.3 2.5-3 2.5-3 1.1-3 2.5 1.3 2.5 3 2.5 3-1.1 3-2.5M12 4v2m0 12v-2"/></svg></span><span class="nav-txt">Tokens</span></a>
+      <a class="nav-link ${active === "alpha" ? "active" : ""}" href="/alpha" title="Alpha"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H11l-1 8.5L18.5 10H12z"/></svg></span><span class="nav-txt">Alpha</span></a>
+      <a class="nav-link ${active === "sniper" ? "active" : ""}" href="/sniper" title="Sniper"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg></span><span class="nav-txt">Sniper</span></a>
       <!-- MM hidden: the market-making engine only works on Robinhood Chain (4663),
            which this single-chain mainnet build doesn't trade. The /mm route still
            exists — restore this link if MM ever comes back.
       <a class="nav-link ${active === "mm" ? "active" : ""}" href="/mm">MM</a> -->
-      <a class="nav-link ${active === "trades" ? "active" : ""}" href="/trades">Trades</a>
-      <a class="nav-link ${active === "settings" ? "active" : ""}" href="/settings">Settings</a>
-      <a class="nav-link ${active === "swap" ? "active" : ""}" href="/swap">Swap</a>
+      <a class="nav-link ${active === "trades" ? "active" : ""}" href="/trades" title="Trades"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-8"/><path d="M15 8h5v5"/></svg></span><span class="nav-txt">Trades</span></a>
+      <a class="nav-link ${active === "settings" ? "active" : ""}" href="/settings" title="Settings"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H2a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V2a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span><span class="nav-txt">Settings</span></a>
+      <a class="nav-link ${active === "swap" ? "active" : ""}" href="/swap" title="Swap"><span class="nav-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L4 7m3-3 3 3"/><path d="M17 8v12m0 0 3-3m-3 3-3-3"/></svg></span><span class="nav-txt">Swap</span></a>
       ${WALLET_CONNECT_BUTTON}
       ${COPILOT_BADGE}
       ${WALLET_NAV_BUTTON}
